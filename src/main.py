@@ -128,7 +128,7 @@ if __name__ == "__main__":
     train_data = Data(train_data, edge2idx)
     test_data = Data(test_data, edge2idx)
 
-    model = trans_to_cuda(SessionGraph())
+    model = trans_to_cuda(SessionGraph(num_node = config.num_node))
 
     start = time.time()
     best_result = [0, 0, 0, 0, 0, 0]

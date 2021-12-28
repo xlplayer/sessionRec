@@ -10,8 +10,24 @@ lr_dc_step = 3
 l2 = 1e-5
 hop = 2
 dropout_local = 0
+dropout_attn = 0.5
 alpha = 0.2
 
-graph_path = "./data/"+dataset+"_edges.csv"
+# graph_path = "./data/"+dataset+"_edges.csv"
+
+if dataset == "diginetica":
+    num_node = 43098
+    dropout_local=0.0
+
+elif dataset == "Nowplaying":
+    num_node = 60417
+    dropout_local = 0.0
+
+elif dataset == "Tmall":
+    num_node = 40728
+    dropout_local = 0.5
+
+
+
 
 

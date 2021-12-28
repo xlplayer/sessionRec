@@ -18,11 +18,13 @@ class Data(Dataset):
 
         items = np.unique(seq)
         item2id = {n:i for i,n in enumerate(items)}
+        
         graph_data = {
             ('item', 'interacts', 'item'):([],[]),
             ('item', 'agg', 'target'):([],[])
         }
         g = dgl.heterograph(graph_data)
+
         g = dgl.add_nodes(g, len(items), ntype='item')
         g.nodes['item'].data['iid'] = torch.tensor(items)
 
@@ -30,6 +32,42 @@ class Data(Dataset):
         g.add_edges(seq_nid, seq_nid, etype='interacts')
         src = seq_nid[:-1]
         dst = seq_nid[1:]
+        g.add_edges(src, dst, etype='interacts')
+        g.add_edges(dst, src, etype='interacts')
+
+        src = seq_nid[:-2]
+        dst = seq_nid[2:]
+        g.add_edges(src, dst, etype='interacts')
+        g.add_edges(dst, src, etype='interacts')
+
+        src = seq_nid[:-3]
+        dst = seq_nid[3:]
+        g.add_edges(src, dst, etype='interacts')
+        g.add_edges(dst, src, etype='interacts')
+
+
+        src = seq_nid[:-4]
+        dst = seq_nid[4:]
+        g.add_edges(src, dst, etype='interacts')
+        g.add_edges(dst, src, etype='interacts')
+
+        src = seq_nid[:-5]
+        dst = seq_nid[5:]
+        g.add_edges(src, dst, etype='interacts')
+        g.add_edges(dst, src, etype='interacts')
+
+        src = seq_nid[:-6]
+        dst = seq_nid[6:]
+        g.add_edges(src, dst, etype='interacts')
+        g.add_edges(dst, src, etype='interacts')
+
+        src = seq_nid[:-7]
+        dst = seq_nid[7:]
+        g.add_edges(src, dst, etype='interacts')
+        g.add_edges(dst, src, etype='interacts')
+
+        src = seq_nid[:-8]
+        dst = seq_nid[8:]
         g.add_edges(src, dst, etype='interacts')
         g.add_edges(dst, src, etype='interacts')
         

@@ -77,24 +77,27 @@ class DglAggregator(nn.Module):
         super(DglAggregator, self).__init__()
         self.dim = dim
 
-        self.p = nn.Linear(self.dim, 1, bias=False)
+        self.pi = nn.Linear(self.dim, 1, bias=False)
+        self.pe = nn.Linear(self.dim, 1, bias=False)
         self.q = nn.Linear(2*self.dim, self.dim, bias=False)
         self.r = nn.Linear(2*self.dim, self.dim, bias=False)
 
         self.leakyrelu = nn.LeakyReLU(alpha)
+        self.dropout_local = nn.Dropout(config.dropout_local)
+        self.dropout_attn = nn.Dropout(config.dropout_attn)
 
     def forward(self, h_n, h_p, h_t, g):
         with g.local_scope():
 
             ###item to item
             adj = g.edge_type_subgraph(['interacts'])
-            adj.ndata['ft'] = h_n
-            adj.apply_edges(fn.u_mul_v('ft','ft','e'))
-            e = self.p(adj.edata['e'])
+            adj.nodes['item'].data['ft'] = h_n
+            adj.apply_edges(fn.u_mul_v('ft','ft','e'), etype='interacts')
+            e = self.pi(adj.edges['interacts'].data['e'])
             e= self.leakyrelu(e)
-            adj.edata['a'] = edge_softmax(adj, e)
-            adj.update_all(fn.u_mul_e('ft', 'a', 'm'), fn.sum('m', 'ft'))
-            
+            adj.edges['interacts'].data['a'] = self.dropout_local(edge_softmax(adj['interacts'], e))
+            adj.update_all(fn.u_mul_e('ft', 'a', 'm'), fn.sum('m', 'ft'), etype='interacts')
+    
 
             ###agg
             adj = g.edge_type_subgraph(['agg'])
@@ -114,11 +117,9 @@ class DglAggregator(nn.Module):
 
 
 class SessionGraph(nn.Module):
-    def __init__(self):
+    def __init__(self, num_node):
         super(SessionGraph, self).__init__()
-        edges = pd.read_csv(config.graph_path)
-        graph = nx.from_edgelist(edges.values.tolist())
-        self.num_node = len(graph.nodes)
+        self.num_node = num_node
         print(self.num_node)
 
         self.embedding = nn.Embedding(self.num_node, config.dim)
