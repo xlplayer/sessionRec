@@ -1,3 +1,4 @@
+from numpy.lib.twodim_base import mask_indices
 import config
 import time
 import datetime
@@ -6,7 +7,7 @@ import numpy as np
 import random
 import pickle
 from tqdm import tqdm
-from model import SessionGraph
+from model import SessionGraph,Transformer
 from utils import Data
 import torch.nn.functional as F
 import networkx as nx
@@ -39,6 +40,19 @@ def trans_to_cpu(variable):
 
 def collate_fn(samples):
     g, target = zip(*samples)
+    # total_num_node = 0
+    # for i in range(len(g)):
+    #     total_num_node += len(g[i].nodes(ntype='item'))
+    # mask = np.zeros((total_num_node,total_num_node))
+    # start = 0
+    # for i in range(len(g)):
+    #     end = start+len(g[i].nodes(ntype='item'))
+    #     mask[start:end, start:end] = adj[i]
+    #     start = end
+
+    # mask[1:total_num_node,0:total_num_node-1] -= np.eye(total_num_node-1)
+    # mask[0:total_num_node-1,1:total_num_node] -= np.eye(total_num_node-1)
+    
     g = dgl.batch(g)
     return g, torch.tensor(target)
 
@@ -56,7 +70,7 @@ def train_test(model, train_data, test_data, epoch):
             g, target = data
             g = g.to(torch.device('cuda'))
             targets = trans_to_cuda(target).long()
-            scores =  model(g)
+            scores =  model(g, epoch)
 
             loss = model.loss_function(scores, targets - 1)
             t.set_postfix(loss = loss.item(), lr = model.optimizer.state_dict()['param_groups'][0]['lr'])
@@ -76,10 +90,11 @@ def train_test(model, train_data, test_data, epoch):
     hit10, mrr10 = [], []
     hit5, mrr5 = [], []
     for data in test_loader:
+        model.optimizer.zero_grad()
         g, target = data
         g = g.to(torch.device('cuda'))
         targets = trans_to_cuda(target).long()
-        scores =  model(g)
+        scores =  model(g, epoch)
 
         sub_scores = scores.topk(20)[1]
         sub_scores = trans_to_cpu(sub_scores).detach().numpy()
@@ -125,10 +140,12 @@ if __name__ == "__main__":
     train_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/train.txt', 'rb'))
     test_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/test.txt', 'rb'))
     edge2idx = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/edge2idx.pkl', 'rb'))
-    train_data = Data(train_data, edge2idx)
-    test_data = Data(test_data, edge2idx)
+    edge2fre = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/edge2fre.pkl', 'rb'))
+    train_data = Data(train_data, edge2idx, edge2fre, is_train=True)
+    test_data = Data(test_data, edge2idx, edge2fre, is_train=False)
 
     model = trans_to_cuda(SessionGraph(num_node = config.num_node))
+    # model = trans_to_cuda(Transformer(num_node = config.num_node))
 
     start = time.time()
     best_result = [0, 0, 0, 0, 0, 0]

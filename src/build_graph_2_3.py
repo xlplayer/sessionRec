@@ -1,3 +1,4 @@
+from math import e
 import pickle
 import argparse
 from tqdm import tqdm
@@ -18,6 +19,8 @@ all_train_seq = pickle.load(open('/home/xl/lxl/dataset/' + dataset + "/" + datas
 nodes = set()
 edges = set()
 edge2idx = {}
+edge2fre = defaultdict(int)
+
 for s in all_train_seq:
     for node in s:
         nodes.add(node)
@@ -25,37 +28,21 @@ for s in all_train_seq:
 for s in all_train_seq:
     for i in range(len(s)):
         edge = tuple(sorted([s[i], s[i]]))
-        if edge not in edges:
-                edges.add(edge)
-                edge2idx[edge] = len(nodes) + len(edges)
+        edges.add(edge)
+
+for s in all_train_seq:
+    for i in range(len(s)-1):
+        edge = tuple(sorted([s[i], s[i+1]]))
+        edges.add(edge)
+
+for s in all_train_seq:
     for i in range(len(s)-1):
         for j in range(i+1, len(s)):
             edge = tuple(sorted([s[i], s[j]]))
-            if edge not in edges:
-                edges.add(edge)
-                edge2idx[edge] = len(nodes) + len(edges)
-
+            edge2fre[edge] += 1
+            
+print(sorted(edge2fre.items(), key=lambda x:x[1], reverse=True)[400000:400010])
+# exit()
 print("nodes num:", len(nodes), "edges num:", len(edges), len(nodes)+len(edges))
 pickle.dump(edge2idx, open('/home/xl/lxl/dataset/' + dataset + "/" + dataset + '/edge2idx.pkl',"wb"))
-
-# G_n = nx.Graph()
-# for s in tqdm(all_train_seq):
-#     for i in range(0,len(s)-1):
-#         G_n.add_edge(s[i],s[i+1])
-#         G_n.add_edge(s[i], edge2idx[(s[i],s[i+1])])
-#         G_n.add_edge(s[i+1], edge2idx[(s[i],s[i+1])])
-#         if i!=len(s)-2:
-#             G_n.add_edge(edge2idx[(s[i],s[i+1])], edge2idx[(s[i+1],s[i+2])])
-
-# G_n.add_node(0)
-# for node in G_n.nodes:
-#     G_n.add_edge(node,node)
-# print(len(G_n.nodes))
-
-# d = {"node_1":[], "node_2":[]}
-# for edge in G_n.edges:
-#     d["node_1"].append(edge[0])
-#     d["node_2"].append(edge[1])
-
-# data = pd.DataFrame(d)
-# data.to_csv('../data/'+dataset+'_edges.csv',sep=',', index=False)
+pickle.dump(edge2fre, open('/home/xl/lxl/dataset/' + dataset + "/" + dataset + '/edge2fre.pkl',"wb"))
