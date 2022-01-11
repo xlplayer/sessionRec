@@ -141,8 +141,9 @@ if __name__ == "__main__":
     test_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/test.txt', 'rb'))
     edge2idx = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/edge2idx.pkl', 'rb'))
     edge2fre = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/edge2fre.pkl', 'rb'))
-    train_data = Data(train_data, edge2idx, edge2fre, is_train=True)
-    test_data = Data(test_data, edge2idx, edge2fre, is_train=False)
+    adj = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', 'rb'))
+    train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
+    test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
 
     model = trans_to_cuda(SessionGraph(num_node = config.num_node))
     # model = trans_to_cuda(Transformer(num_node = config.num_node))

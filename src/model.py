@@ -19,8 +19,10 @@ def udf_agg(edges):
 
 def dis_u_mul_v(edges):
     # return {'e':edges.src['ft']*edges.dst['ft']}
-    return {'e':torch.sum(edges.src['ft']*edges.dst['ft']*edges.data['d'], dim=-1)}
-    return {'e':torch.sum(edges.src['ft']*edges.dst['ft']*(edges.data['dis'].unsqueeze(-1)), dim=-1)}
+    # return {'e':torch.sum(edges.src['ft']*edges.dst['ft']*edges.data['d'], dim=-1)}
+    # print(edges.data['edot'].shape, edges.data['dis'].shape, edges.dst['d'].shape)
+    edges.data['dis'] = edges.data['dis'].unsqueeze(-1)
+    return {'eadd':edges.data['edot']-edges.data['dis']*edges.data['dis']/(2*edges.dst['d']*edges.dst['d'])}
 
 def udf_group(nodes):
     # print(nodes.mailbox['m'].shape, nodes.mailbox['m'].shape[1], nodes.data['ft'].shape, nodes.data['ft'].unsqueeze(-1).repeat(1,nodes.mailbox['m'].shape[1],1).shape)
@@ -447,8 +449,11 @@ class DglAggregator(nn.Module):
         self.pj = nn.Linear(self.dim, 1, bias=False)
         self.q = nn.Linear(2*self.dim, self.dim, bias=False)
         self.r = nn.Linear(2*self.dim, self.dim, bias=False)
+        self.Wp = nn.Linear(self.dim, self.dim, bias=False)
+        self.Ud = nn.Linear(self.dim, 1, bias=False)
 
         self.leakyrelu = nn.LeakyReLU(alpha)
+        self.relu = nn.ReLU()
         self.dropout_local = nn.Dropout(config.dropout_local)
         self.dropout_attn = nn.Dropout(config.dropout_attn)
         self.norm = nn.LayerNorm(self.dim)
@@ -464,12 +469,14 @@ class DglAggregator(nn.Module):
             ###item to item
             adj = g.edge_type_subgraph(['interacts'])
             adj.nodes['item'].data['ft'] = h_v
+            # adj.nodes['item'].data['d'] = 5 * torch.sigmoid(self.Ud(torch.tanh(self.Wp(h_v))))
             adj.apply_edges(fn.u_mul_v('ft','ft','e'), etype='interacts')
             e = self.pi(adj.edges['interacts'].data['e'])
-            e= self.leakyrelu(e)
+            # e= self.leakyrelu(e)
 
+            # adj.edges['interacts'].data['edot'] = self.pi(adj.edges['interacts'].data['e'])
             # adj.apply_edges(dis_u_mul_v, etype='interacts')
-            # e = self.leakyrelu(adj.edges['interacts'].data['e'])
+            # e = adj.edges['interacts'].data['eadd']
 
             # adj.edges['interacts'].data['a'] = e
             # adj.update_all(udf_message, udf_edge_softmax, etype='interacts')
