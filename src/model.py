@@ -22,7 +22,7 @@ def dis_u_mul_v(edges):
     # return {'e':torch.sum(edges.src['ft']*edges.dst['ft']*edges.data['d'], dim=-1)}
     # print(edges.data['edot'].shape, edges.data['dis'].shape, edges.dst['d'].shape)
     edges.data['dis'] = edges.data['dis'].unsqueeze(-1)
-    return {'eadd':edges.data['edot']-edges.data['dis']*edges.data['dis']/(2*edges.dst['d']*edges.dst['d'])}
+    return {'d_fea': torch.cat([edges.data['d'], edges.src['ft']*edges.dst['ft']], dim=-1), 'sim':torch.sum(edges.src['ft']*edges.dst['ft'], dim=-1)}
 
 def udf_group(nodes):
     # print(nodes.mailbox['m'].shape, nodes.mailbox['m'].shape[1], nodes.data['ft'].shape, nodes.data['ft'].unsqueeze(-1).repeat(1,nodes.mailbox['m'].shape[1],1).shape)
@@ -31,13 +31,13 @@ def udf_group(nodes):
     return {'ft':torch.sum(sim.unsqueeze(-1)*nodes.mailbox['m'], dim=-2)}
 
 def udf_message(edges):
-    return {'ft': edges.src['ft'], 'a':edges.data['a']}
+    return {'ft': edges.src['ft'], 'gumble':edges.data['gumble'], 'sim':edges.data['sim']}
 
 def udf_edge_softmax(nodes):
-    # print(nodes.mailbox['ft'].shape, nodes.mailbox['a'].shape)
-    # return {'ft': torch.sum(nodes.mailbox['ft'], dim=1)}
-    a = F.softmax(nodes.mailbox['a'].squeeze(-1), dim=-1)
-    a = a.unsqueeze(-1)
+    # print(nodes.mailbox['ft'].shape, nodes.mailbox['gumble'].shape, nodes.mailbox['sim'].shape)
+    # exit()
+    a = F.softmax(nodes.mailbox['sim'], dim=-1) *  nodes.mailbox['gumble'][:,:,1]
+    a = a.unsqueeze(-1) 
     return {'ft': torch.sum(nodes.mailbox['ft']*a, dim=1)}
 
 def src_dot_dst(src_field, dst_field, out_field):
@@ -449,8 +449,7 @@ class DglAggregator(nn.Module):
         self.pj = nn.Linear(self.dim, 1, bias=False)
         self.q = nn.Linear(2*self.dim, self.dim, bias=False)
         self.r = nn.Linear(2*self.dim, self.dim, bias=False)
-        self.Wp = nn.Linear(self.dim, self.dim, bias=False)
-        self.Ud = nn.Linear(self.dim, 1, bias=False)
+        self.Two = nn.Linear(2*self.dim, 2)
 
         self.leakyrelu = nn.LeakyReLU(alpha)
         self.relu = nn.ReLU()
@@ -464,21 +463,21 @@ class DglAggregator(nn.Module):
         for weight in self.parameters():
             weight.data.uniform_(-stdv, stdv)
 
-    def forward(self, h_v, h_p, h_t, g):
+    def forward(self, h_v, h_d, h_p, h_t, g):
         with g.local_scope():
             ###item to item
             adj = g.edge_type_subgraph(['interacts'])
             adj.nodes['item'].data['ft'] = h_v
-            # adj.nodes['item'].data['d'] = 5 * torch.sigmoid(self.Ud(torch.tanh(self.Wp(h_v))))
+            adj.edges['interacts'].data['d'] = h_d
             adj.apply_edges(fn.u_mul_v('ft','ft','e'), etype='interacts')
             e = self.pi(adj.edges['interacts'].data['e'])
             # e= self.leakyrelu(e)
 
-            # adj.edges['interacts'].data['edot'] = self.pi(adj.edges['interacts'].data['e'])
             # adj.apply_edges(dis_u_mul_v, etype='interacts')
-            # e = adj.edges['interacts'].data['eadd']
+            # gumble = self.Two(adj.edges['interacts'].data['d_fea'])
+            # gumble = F.gumbel_softmax(gumble, tau=0.1, hard=False)
 
-            # adj.edges['interacts'].data['a'] = e
+            # adj.edges['interacts'].data['gumble'] = gumble
             # adj.update_all(udf_message, udf_edge_softmax, etype='interacts')
 
             adj.edges['interacts'].data['a'] = self.dropout_local(edge_softmax(adj['interacts'], e))
@@ -492,14 +491,31 @@ class DglAggregator(nn.Module):
             e = self.q(torch.cat([adj.edata['ft'], adj.edata['pos']], dim=-1))
             adj.edata['e'] = torch.tanh(e)
 
-            adj.update_all(fn.copy_edge('ft', 'm'), fn.mean('m', 'mean'))
-            f = self.r(torch.cat([adj.nodes['target'].data['ft'], adj.nodes['target'].data['mean']], dim=-1))
+            last_nodes = adj.filter_nodes(lambda nodes: nodes.data['last']==1, ntype='item')
+            last_feat = adj.nodes['item'].data['ft'][last_nodes]
+            f = self.r(torch.cat([adj.nodes['target'].data['ft'], last_feat], dim=-1))
+
+            # adj.update_all(fn.copy_edge('ft', 'm'), fn.mean('m', 'mean'))
+            # f = self.r(torch.cat([adj.nodes['target'].data['ft'], adj.nodes['target'].data['mean']], dim=-1))
             adj.nodes['target'].data['ft'] = f
 
             adj.update_all(udf_agg, fn.sum('m', 'ft'))
 
             return g.nodes['target'].data['ft']
 
+# ignore weight decay for parameters in bias, batch norm and activation
+def fix_weight_decay(model):
+    decay = []
+    no_decay = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(map(lambda x: x in name, ['bias', 'batch_norm', 'activation'])):
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    params = [{'params': decay}, {'params': no_decay, 'weight_decay': 0}]
+    return params
 
 class SessionGraph(nn.Module):
     def __init__(self, num_node):
@@ -510,8 +526,9 @@ class SessionGraph(nn.Module):
         self.embedding = nn.Embedding(self.num_node, config.dim)
         self.pos_embedding = nn.Embedding(200, config.dim)
         self.dis_embedding = nn.Embedding(200, config.dim)
-        self.target_embedding = nn.Embedding(1, config.dim)
+        self.target_embedding = nn.Embedding(10, config.dim)
         self.group_embedding = nn.Embedding(1, config.dim)
+        self.feat_drop = nn.Dropout(config.feat_drop)
         
         # Parameters        
         # self.kmeans = Kmeans(1, config.dim, 10, 0.999, 1e-4)
@@ -523,8 +540,17 @@ class SessionGraph(nn.Module):
         self.glu1 = nn.Linear(config.dim, config.dim)
         self.glu2 = nn.Linear(config.dim, config.dim, bias=False)
 
+        self.sc_sr = nn.ModuleList()
+        for i in range(1):
+            self.sc_sr.append(nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1)))
+
         self.loss_function = nn.CrossEntropyLoss()
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=config.lr)#, weight_decay=config.l2)
+        print('weight_decay:', config.weight_decay)
+        if config.weight_decay > 0:
+            params = fix_weight_decay(self)
+        else:
+            params = self.parameters()
+        self.optimizer = torch.optim.Adam(params, lr=config.lr, weight_decay=config.weight_decay)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
 
         self.reset_parameters()
@@ -537,6 +563,10 @@ class SessionGraph(nn.Module):
     
     def forward(self, g, epoch):
         h_v = self.embedding(g.nodes['item'].data['iid'])
+        h_v = self.feat_drop(h_v)
+        h_v = F.normalize(h_v, dim=-1)
+        
+        h_d = self.dis_embedding(g.edges['interacts'].data['dis'])
         # dists, buckets, aux_loss = self.kmeans(h_v.unsqueeze(0).unsqueeze(0),  self.training)
         # buckets = buckets.squeeze(0).squeeze(0)
 
@@ -551,7 +581,34 @@ class SessionGraph(nn.Module):
 
         h_p = self.pos_embedding(g.edges['agg'].data['pid'])
         h_r = self.target_embedding(g.nodes['target'].data['tid'])
-        select = self.local_agg(h_v, h_p, h_r, g)
-        b = self.embedding.weight[1:config.num_node]  # n_nodes x latent_size
-        scores = torch.matmul(select, b.transpose(1, 0))
-        return scores
+        sr = self.local_agg(h_v, h_d, h_p, h_r, g)
+        b = self.embedding.weight#[1:config.num_node]  # n_nodes x latent_size
+
+        sr = F.normalize(sr, dim=-1)
+        b = F.normalize(b, dim=-1)
+        
+        logits = torch.matmul(sr, b.transpose(1, 0))
+
+        return torch.softmax(12 * logits, dim=1).log()
+
+        phi = self.sc_sr[0](sr).unsqueeze(-1)
+        mask = torch.zeros(phi.size(0), config.num_node).cuda()
+        iids = torch.split(g.nodes['item'].data['iid'], g.batch_num_nodes('item').tolist())
+        for i in range(len(mask)):
+            mask[i, iids[i]] = 1
+        # print(iids)
+        logits_in = logits.masked_fill(~mask.bool(), float('-inf'))
+        logits_ex = logits.masked_fill(mask.bool(), float('-inf'))
+        score     = torch.softmax(12 * logits_in, dim=-1)
+        score_ex  = torch.softmax(12 * logits_ex, dim=-1) 
+        # if torch.isnan(score).any():
+        #     score    = feat.masked_fill(score != score, 0)
+        # if torch.isnan(score_ex).any():
+        #     score_ex = score_ex.masked_fill(score_ex != score_ex, 0)
+        assert not torch.isnan(score).any()
+        assert not torch.isnan(score_ex).any()
+
+        phi = phi.squeeze(1)
+        # print(score.unsqueeze(1).shape, score_ex.unsqueeze(1).shape, phi.shape)
+        score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
+        return torch.log(score)

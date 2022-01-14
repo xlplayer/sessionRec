@@ -62,7 +62,7 @@ def train_test(model, train_data, test_data, epoch):
 
     total_loss = 0.0
     train_loader = torch.utils.data.DataLoader(train_data, num_workers=20, batch_size=config.batch_size,
-                                               shuffle=True, pin_memory=True, collate_fn=collate_fn)
+                                               shuffle=False, pin_memory=True, collate_fn=collate_fn)
     
     with tqdm(train_loader) as t:
         for data in t:
@@ -71,8 +71,9 @@ def train_test(model, train_data, test_data, epoch):
             g = g.to(torch.device('cuda'))
             targets = trans_to_cuda(target).long()
             scores =  model(g, epoch)
+            assert not torch.isnan(scores).any()
 
-            loss = model.loss_function(scores, targets - 1)
+            loss = F.nll_loss(scores, targets)
             t.set_postfix(loss = loss.item(), lr = model.optimizer.state_dict()['param_groups'][0]['lr'])
             loss.backward()
             model.optimizer.step()
@@ -95,34 +96,35 @@ def train_test(model, train_data, test_data, epoch):
         g = g.to(torch.device('cuda'))
         targets = trans_to_cuda(target).long()
         scores =  model(g, epoch)
-
+        assert not torch.isnan(scores).any()
+        
         sub_scores = scores.topk(20)[1]
         sub_scores = trans_to_cpu(sub_scores).detach().numpy()
         targets = target.numpy()
         for score, target in zip(sub_scores, targets):
-            hit20.append(np.isin(target - 1, score))
-            if len(np.where(score == target - 1)[0]) == 0:
+            hit20.append(np.isin(target, score))
+            if len(np.where(score == target)[0]) == 0:
                 mrr20.append(0)
             else:
-                mrr20.append(1 / (np.where(score == target - 1)[0][0] + 1))
+                mrr20.append(1 / (np.where(score == target)[0][0] + 1))
 
         sub_scores = scores.topk(10)[1]
         sub_scores = trans_to_cpu(sub_scores).detach().numpy()
         for score, target in zip(sub_scores, targets):
-            hit10.append(np.isin(target - 1, score))
-            if len(np.where(score == target - 1)[0]) == 0:
+            hit10.append(np.isin(target, score))
+            if len(np.where(score == target)[0]) == 0:
                 mrr10.append(0)
             else:
-                mrr10.append(1 / (np.where(score == target - 1)[0][0] + 1))
+                mrr10.append(1 / (np.where(score == target)[0][0] + 1))
         
         sub_scores = scores.topk(5)[1]
         sub_scores = trans_to_cpu(sub_scores).detach().numpy()
         for score, target in zip(sub_scores, targets):
-            hit5.append(np.isin(target - 1, score))
-            if len(np.where(score == target - 1)[0]) == 0:
+            hit5.append(np.isin(target, score))
+            if len(np.where(score == target)[0]) == 0:
                 mrr5.append(0)
             else:
-                mrr5.append(1 / (np.where(score == target - 1)[0][0] + 1))
+                mrr5.append(1 / (np.where(score == target)[0][0] + 1))
 
     result.append(np.mean(hit5) * 100)
     result.append(np.mean(hit10) * 100)
@@ -133,20 +135,39 @@ def train_test(model, train_data, test_data, epoch):
 
     return result
 
+import pandas as pd
+def read_sessions(filepath):
+    sessions = pd.read_csv(filepath, sep='\t', header=None, squeeze=True)
+    sessions = sessions.apply(lambda x: list(map(int, x.split(',')))).values
+    return sessions
+
+def read_dataset(dataset_dir):
+    train_sessions = read_sessions(dataset_dir / 'train.txt')
+    test_sessions = read_sessions(dataset_dir / 'test.txt')
+    with open(dataset_dir / 'num_items.txt', 'r') as f:
+        num_items = int(f.readline())
+    return train_sessions, test_sessions, num_items
+
+from pathlib import Path
+from utils import AugmentedDataset
+train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/diginetica"))
+config.num_node = num_items
+train_data = AugmentedDataset(train_sessions)
+test_data = AugmentedDataset(test_sessions)
+
 if __name__ == "__main__":
     print(config.dataset, config.num_node, "lr:",config.lr, "lr_dc:",config.lr_dc, "lr_dc_step:",config.lr_dc_step, "dropout_local:",config.dropout_local)
     init_seed(42)
 
-    train_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/train.txt', 'rb'))
-    test_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/test.txt', 'rb'))
-    edge2idx = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/edge2idx.pkl', 'rb'))
-    edge2fre = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/edge2fre.pkl', 'rb'))
-    adj = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', 'rb'))
-    train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
-    test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
+    # train_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/train.txt', 'rb'))
+    # test_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/test.txt', 'rb'))
+    # edge2idx = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/edge2idx.pkl', 'rb'))
+    # edge2fre = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/edge2fre.pkl', 'rb'))
+    # adj = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', 'rb'))
+    # train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
+    # test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
 
     model = trans_to_cuda(SessionGraph(num_node = config.num_node))
-    # model = trans_to_cuda(Transformer(num_node = config.num_node))
 
     start = time.time()
     best_result = [0, 0, 0, 0, 0, 0]

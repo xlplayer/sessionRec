@@ -122,6 +122,9 @@ class Data(Dataset):
         g = dgl.add_nodes(g, len(items), ntype='item')
         g.nodes['item'].data['iid'] = torch.tensor(items)
         g.nodes['item'].data['pid'] = torch.tensor(list(range(len(items))))
+        is_last = np.zeros(len(items))
+        is_last[item2id[seq[0]]] = 1
+        g.nodes['item'].data['last'] = torch.tensor(is_last)
 
         seq_nid = [item2id[item] for item in seq if item!= 0]
         g.add_edges(seq_nid, seq_nid, {'dis': torch.zeros(len(seq_nid), dtype=torch.long)}, etype='interacts')
@@ -136,9 +139,76 @@ class Data(Dataset):
         g = dgl.add_nodes(g, 1, ntype='target')
         g.nodes['target'].data['tid'] = torch.tensor([0])
         g.add_edges(seq_nid, [0]*len(seq_nid), etype='agg')
-        g.edges['agg'].data['pid'] = torch.tensor(range(len(seq_nid)))
+        g.edges['agg'].data['pid'] = torch.tensor(list(range(len(seq_nid))))
 
         return g, target
 
     def __len__(self):
         return self.length
+
+
+import itertools
+
+def create_index(sessions):
+    lens = np.fromiter(map(len, sessions), dtype=np.long)
+    session_idx = np.repeat(np.arange(len(sessions)), lens - 1)
+    label_idx = map(lambda l: range(1, l), lens)
+    label_idx = itertools.chain.from_iterable(label_idx)
+    label_idx = np.fromiter(label_idx, dtype=np.long)
+    idx = np.column_stack((session_idx, label_idx))
+    return idx
+
+
+class AugmentedDataset:
+    def __init__(self, sessions, sort_by_length=False):
+        self.sessions = sessions
+        # self.graphs = graphs
+        index = create_index(sessions)  # columns: sessionId, labelIndex
+
+        if sort_by_length:
+            # sort by labelIndex in descending order
+            ind = np.argsort(index[:, 1])[::-1]
+            index = index[ind]
+        self.index = index
+
+    def __getitem__(self, idx):
+        #print(idx)
+        sid, lidx = self.index[idx]
+        seq = list(reversed(self.sessions[sid][:lidx]))
+        target = self.sessions[sid][lidx]
+        
+        items = list(np.unique(seq))
+        item2id = {n:i for i,n in enumerate(items)}
+
+        graph_data = {
+            ('item', 'interacts', 'item'):([],[]),
+            ('item', 'agg', 'target'):([],[])
+        }
+        g = dgl.heterograph(graph_data)
+        
+        g = dgl.add_nodes(g, len(items), ntype='item')
+        g.nodes['item'].data['iid'] = torch.tensor(items)
+        g.nodes['item'].data['pid'] = torch.tensor(list(range(len(items))))
+        is_last = np.zeros(len(items))
+        is_last[item2id[seq[0]]] = 1
+        g.nodes['item'].data['last'] = torch.tensor(is_last)
+
+        seq_nid = [item2id[item] for item in seq if item!= 0]
+        g.add_edges(seq_nid, seq_nid, {'dis': torch.zeros(len(seq_nid), dtype=torch.long)}, etype='interacts')
+
+        for i in range(1, 2):
+            src = seq_nid[:-i]
+            dst = seq_nid[i:]
+            # g.add_edges(src, dst, {'dis':i*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
+            g.add_edges(dst, src, {'dis':i*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
+               
+        #agg
+        g = dgl.add_nodes(g, 1, ntype='target')
+        g.nodes['target'].data['tid'] = torch.tensor([0])
+        g.add_edges(seq_nid, [0]*len(seq_nid), etype='agg')
+        g.edges['agg'].data['pid'] = torch.tensor(list(range(len(seq_nid))))
+
+        return g, target
+
+    def __len__(self):
+        return len(self.index)
