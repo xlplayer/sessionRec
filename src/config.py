@@ -5,15 +5,17 @@ epoch = 20
 activate = 'relu'
 batch_size = 512
 lr = 0.001
-lr_dc = 0.1
+lr_dc = 0.5
 lr_dc_step = 10
 l2 = 1e-5
 hop = 2
 dropout_local = 0
 dropout_attn = 0.5
-feat_drop = 0.2
+feat_drop = 0.15
 alpha = 0.2
 weight_decay = 0
+order = 1
+lb_smooth = 0.4
 
 # graph_path = "./data/"+dataset+"_edges.csv"
 

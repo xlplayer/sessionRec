@@ -13,13 +13,15 @@ import dgl
 from dgl import function as fn
 from dgl.nn.pytorch import edge_softmax
 from entmax import sparsemax, entmax15, entmax_bisect
+from label_smooth import LabelSmoothSoftmaxCEV1
+
 
 def udf_agg(edges):
     return {'m':edges.src['ft']*torch.sum(edges.data['e'] * edges.dst['ft'], dim=-1, keepdim=True)}
 
 def dis_u_mul_v(edges):
-    # return {'e':edges.src['ft']*edges.dst['ft']}
-    # return {'e':torch.sum(edges.src['ft']*edges.dst['ft']*edges.data['d'], dim=-1)}
+    return {'e': edges.src['ft']*edges.dst['ft']*edges.data['d'],'mask':torch.cat([edges.src['ft']*edges.dst['ft'], edges.data['d']], dim=-1)}
+    return {'e':edges.src['ft']*edges.dst['ft']*edges.data['d'], 'sim': torch.sigmoid(torch.sum(edges.src['ft']*edges.dst['ft'], dim=-1))}
     # print(edges.data['edot'].shape, edges.data['dis'].shape, edges.dst['d'].shape)
     edges.data['dis'] = edges.data['dis'].unsqueeze(-1)
     return {'d_fea': torch.cat([edges.data['d'], edges.src['ft']*edges.dst['ft']], dim=-1), 'sim':torch.sum(edges.src['ft']*edges.dst['ft'], dim=-1)}
@@ -449,6 +451,7 @@ class DglAggregator(nn.Module):
         self.pj = nn.Linear(self.dim, 1, bias=False)
         self.q = nn.Linear(2*self.dim, self.dim, bias=False)
         self.r = nn.Linear(2*self.dim, self.dim, bias=False)
+        self.M = nn.Linear(2*self.dim, 1, bias=False)
         self.Two = nn.Linear(2*self.dim, 2)
 
         self.leakyrelu = nn.LeakyReLU(alpha)
@@ -456,7 +459,7 @@ class DglAggregator(nn.Module):
         self.dropout_local = nn.Dropout(config.dropout_local)
         self.dropout_attn = nn.Dropout(config.dropout_attn)
         self.norm = nn.LayerNorm(self.dim)
-        self.reset_parameters()
+        # self.reset_parameters()
 
     def reset_parameters(self):
         stdv = 1.0 / math.sqrt(config.dim)
@@ -469,11 +472,18 @@ class DglAggregator(nn.Module):
             adj = g.edge_type_subgraph(['interacts'])
             adj.nodes['item'].data['ft'] = h_v
             adj.edges['interacts'].data['d'] = h_d
-            adj.apply_edges(fn.u_mul_v('ft','ft','e'), etype='interacts')
+            # adj.apply_edges(fn.u_mul_v('ft','ft','e'), etype='interacts')
+            adj.apply_edges(dis_u_mul_v, etype='interacts')
             e = self.pi(adj.edges['interacts'].data['e'])
+            mask = torch.sigmoid(self.M(adj.edges['interacts'].data['mask']))
+            e = e * mask
+            # e = self.pi(adj.edges['interacts'].data['e'])
+            # sim = adj.edges['interacts'].data['sim']
+            # dis = adj.edges['interacts'].data['dis']
+            # e = e.masked_fill((sim.unsqueeze(-1)<0.4) & (dis.unsqueeze(-1)>10), float('-inf'))
             # e= self.leakyrelu(e)
 
-            # adj.apply_edges(dis_u_mul_v, etype='interacts')
+            
             # gumble = self.Two(adj.edges['interacts'].data['d_fea'])
             # gumble = F.gumbel_softmax(gumble, tau=0.1, hard=False)
 
@@ -493,6 +503,10 @@ class DglAggregator(nn.Module):
 
             last_nodes = adj.filter_nodes(lambda nodes: nodes.data['last']==1, ntype='item')
             last_feat = adj.nodes['item'].data['ft'][last_nodes]
+            last_feat = last_feat.unsqueeze(1).repeat(1,config.order,1).view(-1, config.dim)
+            # print(last_feat.shape)
+            # last_feat = dgl.broadcast_nodes(adj, last_feat, ntype='target')
+            # print(adj.nodes['target'].data['ft'].shape, last_feat.shape)
             f = self.r(torch.cat([adj.nodes['target'].data['ft'], last_feat], dim=-1))
 
             # adj.update_all(fn.copy_edge('ft', 'm'), fn.mean('m', 'mean'))
@@ -525,6 +539,7 @@ class SessionGraph(nn.Module):
 
         self.embedding = nn.Embedding(self.num_node, config.dim)
         self.pos_embedding = nn.Embedding(200, config.dim)
+        self.len_embedding = nn.Embedding(200, config.dim)
         self.dis_embedding = nn.Embedding(200, config.dim)
         self.target_embedding = nn.Embedding(10, config.dim)
         self.group_embedding = nn.Embedding(1, config.dim)
@@ -539,12 +554,15 @@ class SessionGraph(nn.Module):
         self.w_2 = nn.Parameter(torch.Tensor(config.dim, 1))
         self.glu1 = nn.Linear(config.dim, config.dim)
         self.glu2 = nn.Linear(config.dim, config.dim, bias=False)
+        self.alpha    = nn.Parameter(torch.Tensor(config.order))
+        self.phi = nn.Parameter(torch.Tensor(2))
 
         self.sc_sr = nn.ModuleList()
         for i in range(1):
             self.sc_sr.append(nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1)))
 
-        self.loss_function = nn.CrossEntropyLoss()
+        # self.loss_function = nn.CrossEntropyLoss()
+        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, ignore_index=0, reduction='mean')
         print('weight_decay:', config.weight_decay)
         if config.weight_decay > 0:
             params = fix_weight_decay(self)
@@ -554,6 +572,10 @@ class SessionGraph(nn.Module):
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
 
         self.reset_parameters()
+        self.alpha.data = torch.zeros(config.order)
+        self.alpha.data[0] = torch.tensor(1.0)
+        self.phi.data[0] = 0
+        self.phi.data[1] = 1
 
     def reset_parameters(self):
         stdv = 1.0 / math.sqrt(config.dim)
@@ -588,10 +610,19 @@ class SessionGraph(nn.Module):
         b = F.normalize(b, dim=-1)
         
         logits = torch.matmul(sr, b.transpose(1, 0))
+        score = torch.softmax(12 * logits, dim=1).log()
+        # score = score.view(-1, config.order, self.num_node)
 
-        return torch.softmax(12 * logits, dim=1).log()
+        # alpha = torch.softmax(self.alpha.unsqueeze(0), dim=-1).view(1, self.alpha.size(0), 1)
+        # # print(alpha)
+        # g = alpha.repeat(score.size(0), 1, 1)
+        # score = (score * g).sum(1)
+        return score
 
-        phi = self.sc_sr[0](sr).unsqueeze(-1)
+        # phi = self.sc_sr[0](sr).unsqueeze(-1)
+        phi = torch.softmax(self.phi, dim=-1)
+        print(phi)
+        phi = phi.unsqueeze(0).unsqueeze(-1).repeat(sr.size(0),1,1)
         mask = torch.zeros(phi.size(0), config.num_node).cuda()
         iids = torch.split(g.nodes['item'].data['iid'], g.batch_num_nodes('item').tolist())
         for i in range(len(mask)):

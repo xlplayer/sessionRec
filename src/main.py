@@ -73,7 +73,8 @@ def train_test(model, train_data, test_data, epoch):
             scores =  model(g, epoch)
             assert not torch.isnan(scores).any()
 
-            loss = F.nll_loss(scores, targets)
+            # loss = F.nll_loss(scores, targets)
+            loss = model.loss_function(scores, targets)
             t.set_postfix(loss = loss.item(), lr = model.optimizer.state_dict()['param_groups'][0]['lr'])
             loss.backward()
             model.optimizer.step()
@@ -152,8 +153,9 @@ from pathlib import Path
 from utils import AugmentedDataset
 train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/diginetica"))
 config.num_node = num_items
-train_data = AugmentedDataset(train_sessions)
-test_data = AugmentedDataset(test_sessions)
+G = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', 'rb'))
+train_data = AugmentedDataset(train_sessions, G)
+test_data = AugmentedDataset(test_sessions, G)
 
 if __name__ == "__main__":
     print(config.dataset, config.num_node, "lr:",config.lr, "lr_dc:",config.lr_dc, "lr_dc_step:",config.lr_dc_step, "dropout_local:",config.dropout_local)
