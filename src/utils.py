@@ -1,3 +1,4 @@
+from collections import defaultdict
 import numpy as np
 import random
 
@@ -160,7 +161,7 @@ def create_index(sessions):
 
 
 class AugmentedDataset:
-    def __init__(self, sessions, G, sort_by_length=False):
+    def __init__(self, sessions, G, sort_by_length=False, NCE=False):
         self.sessions = sessions
         self.G = G
         # self.graphs = graphs
@@ -170,6 +171,19 @@ class AugmentedDataset:
             # sort by labelIndex in descending order
             ind = np.argsort(index[:, 1])[::-1]
             index = index[ind]
+        
+        if NCE:
+            self.target2idx = defaultdict(list)
+            for i, (sid,lidx) in enumerate(index):
+                target = self.sessions[sid][lidx]
+                self.target2idx[target].append(i)
+            
+            # y = [self.sessions[sid][lidx] for sid,lidx in index]
+            # ind = np.argsort(y)
+            # of = open("log.txt", 'w')
+            # for i in ind:
+            #     sid, lidx = index[i]
+            #     print(self.sessions[sid][:lidx], self.sessions[sid][lidx], file=of)
         self.index = index
 
     def __getitem__(self, idx):
@@ -195,10 +209,10 @@ class AugmentedDataset:
         is_last[item2id[seq[0]]] = 1
         g.nodes['item'].data['last'] = torch.tensor(is_last)
 
-        seq_nid = [item2id[item] for item in seq if item!= 0]
+        seq_nid = [item2id[item] for item in seq]
         g.add_edges(list(set(seq_nid)), list(set(seq_nid)), {'dis': torch.zeros(len(list(set(seq_nid))), dtype=torch.long)}, etype='interacts')
 
-        # edges = set([(item2id[e[0]], item2id[e[1]]) for e in self.G.subgraph(items).edges(data='weight') if e[2]>1]) | set([(item2id[e[1]], item2id[e[0]]) for e in self.G.subgraph(items).edges(data='weight') if e[2]>1])
+        # EDGES = set([(item2id[e[0]], item2id[e[1]]) for e in self.G.subgraph(items).edges(data='weight') if e[2]>1]) | set([(item2id[e[1]], item2id[e[0]]) for e in self.G.subgraph(items).edges(data='weight') if e[2]>1])
         for i in range(1, 2):
             src = seq_nid[:-i]
             dst = seq_nid[i:]
@@ -208,11 +222,11 @@ class AugmentedDataset:
                 src, dst = zip(*edges)
                 g.add_edges(src, dst, {'dis':(2*i)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
                 g.add_edges(dst, src, {'dis':(2*i-1)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
-            # edges = edges - set(zip(src,dst)) - set(zip(dst,src)) - set(zip(seq_nid,seq_nid))
+            # EDGES = EDGES - set(zip(src,dst)) - set(zip(dst,src)) - set(zip(seq_nid,seq_nid))
         
         # # print(seq, edges, self.G.subgraph(items).edges())
-        # if len(edges) > 0:
-        #     src, dst = zip(*edges)
+        # if len(EDGES) > 0:
+        #     src, dst = zip(*EDGES)
         #     g.add_edges(src, dst, {'dis':100*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
 
         #agg

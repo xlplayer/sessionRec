@@ -70,11 +70,11 @@ all_train_seq = train_sessions
 G_n = nx.Graph()
 for s in tqdm(all_train_seq):
     for i in range(0,len(s)-1):
-        for j in range(i+1, len(s)):
-            try:
-                G_n[s[i]][s[j]]['weight']+=1
-            except Exception:
-                G_n.add_edge(s[i],s[j], weight=1)
+        # for j in range(i+1, len(s)):
+        try:
+            G_n[s[i]][s[i+1]]['weight']+=1
+        except Exception:
+            G_n.add_edge(s[i],s[i+1], weight=1)
 
 print(len(G_n.nodes()), len(G_n.edges()))
 
