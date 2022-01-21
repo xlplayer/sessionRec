@@ -172,11 +172,22 @@ class AugmentedDataset:
             ind = np.argsort(index[:, 1])[::-1]
             index = index[ind]
         
-        if NCE:
-            self.target2idx = defaultdict(list)
+        # if NCE:
+        self.target2idx = defaultdict(list)
+        for i, (sid,lidx) in enumerate(index):
+            target = self.sessions[sid][lidx]
+            self.target2idx[target].append(i)
+
+        if training:
+            ind = []
             for i, (sid,lidx) in enumerate(index):
                 target = self.sessions[sid][lidx]
-                self.target2idx[target].append(i)
+                if self.target2idx[target].index(i) >= min(0.5*len(self.target2idx[target]), len(self.target2idx[target])-100):
+                    ind.append(i)
+            index = index[ind]
+        # y = [self.sessions[sid][lidx] for sid,lidx in index]
+        # ind = np.argsort(y)
+        # index = index[ind]
         
         self.index = index
 
