@@ -1,3 +1,4 @@
+from turtle import pos
 from numpy.lib.twodim_base import mask_indices
 import config
 import time
@@ -40,19 +41,6 @@ def trans_to_cpu(variable):
 
 def collate_fn(samples):
     g, target = zip(*samples)
-    # total_num_node = 0
-    # for i in range(len(g)):
-    #     total_num_node += len(g[i].nodes(ntype='item'))
-    # mask = np.zeros((total_num_node,total_num_node))
-    # start = 0
-    # for i in range(len(g)):
-    #     end = start+len(g[i].nodes(ntype='item'))
-    #     mask[start:end, start:end] = adj[i]
-    #     start = end
-
-    # mask[1:total_num_node,0:total_num_node-1] -= np.eye(total_num_node-1)
-    # mask[0:total_num_node-1,1:total_num_node] -= np.eye(total_num_node-1)
-    
     g = dgl.batch(g)
     return g, torch.tensor(target)
 
@@ -70,12 +58,14 @@ def train_test(model, train_data, test_data, epoch):
             g, target = data
             g = g.to(torch.device('cuda'))
             targets = trans_to_cuda(target).long()
-            scores =  model(g, epoch)
+            neg_mask = (targets.unsqueeze(0) != targets.unsqueeze(1)).float()
+            pos_mask = (targets.unsqueeze(0) == targets.unsqueeze(1)).float() -torch.eye(targets.shape[0]).cuda()
+            scores, reg_loss =  model(g, epoch, pos_mask, neg_mask, training=True)
             assert not torch.isnan(scores).any()
 
             # loss = F.nll_loss(scores, targets)
-            loss = model.loss_function(scores, targets)
-            t.set_postfix(loss = loss.item(), lr = model.optimizer.state_dict()['param_groups'][0]['lr'])
+            loss = model.loss_function(scores, targets) #+ reg_loss*0.02
+            t.set_postfix(loss = loss.item(), reg_loss=reg_loss.item(), lr = model.optimizer.state_dict()['param_groups'][0]['lr'])
             loss.backward()
             model.optimizer.step()
             total_loss += loss
@@ -154,8 +144,8 @@ from utils import AugmentedDataset
 train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/diginetica"))
 config.num_node = num_items
 G = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', 'rb'))
-train_data = AugmentedDataset(train_sessions, G)
-test_data = AugmentedDataset(test_sessions, G)
+train_data = AugmentedDataset(train_sessions, G, training=True)
+test_data = AugmentedDataset(test_sessions, G, training=False)
 
 if __name__ == "__main__":
     print(config.dataset, config.num_node, "lr:",config.lr, "lr_dc:",config.lr_dc, "lr_dc_step:",config.lr_dc_step, "dropout_local:",config.dropout_local)

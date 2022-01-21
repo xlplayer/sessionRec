@@ -161,11 +161,11 @@ def create_index(sessions):
 
 
 class AugmentedDataset:
-    def __init__(self, sessions, G, sort_by_length=False, NCE=False):
+    def __init__(self, sessions, G, sort_by_length=False, NCE=False, training=False):
         self.sessions = sessions
         self.G = G
         # self.graphs = graphs
-        index = create_index(sessions)  # columns: sessionId, labelIndex
+        index = create_index(self.sessions)  # columns: sessionId, labelIndex
 
         if sort_by_length:
             # sort by labelIndex in descending order
@@ -177,13 +177,7 @@ class AugmentedDataset:
             for i, (sid,lidx) in enumerate(index):
                 target = self.sessions[sid][lidx]
                 self.target2idx[target].append(i)
-            
-            # y = [self.sessions[sid][lidx] for sid,lidx in index]
-            # ind = np.argsort(y)
-            # of = open("log.txt", 'w')
-            # for i in ind:
-            #     sid, lidx = index[i]
-            #     print(self.sessions[sid][:lidx], self.sessions[sid][lidx], file=of)
+        
         self.index = index
 
     def __getitem__(self, idx):

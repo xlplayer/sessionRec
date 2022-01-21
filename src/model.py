@@ -562,7 +562,7 @@ class SessionGraph(nn.Module):
             self.sc_sr.append(nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1)))
 
         # self.loss_function = nn.CrossEntropyLoss()
-        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, ignore_index=0, reduction='mean')
+        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
         print('weight_decay:', config.weight_decay)
         if config.weight_decay > 0:
             params = fix_weight_decay(self)
@@ -583,7 +583,7 @@ class SessionGraph(nn.Module):
             weight.data.uniform_(-stdv, stdv)
         
     
-    def forward(self, g, epoch):
+    def forward(self, g, epoch=None, pos_mask=None, neg_mask=None, training=False):
         h_v = self.embedding(g.nodes['item'].data['iid'])
         h_v = self.feat_drop(h_v)
         h_v = F.normalize(h_v, dim=-1)
@@ -611,12 +611,16 @@ class SessionGraph(nn.Module):
         
         logits = torch.matmul(sr, b.transpose(1, 0))
         score = torch.softmax(12 * logits, dim=1).log()
-        # score = score.view(-1, config.order, self.num_node)
 
-        # alpha = torch.softmax(self.alpha.unsqueeze(0), dim=-1).view(1, self.alpha.size(0), 1)
-        # # print(alpha)
-        # g = alpha.repeat(score.size(0), 1, 1)
-        # score = (score * g).sum(1)
+        if training:
+            reg = torch.matmul(sr, sr.transpose(1, 0))
+            reg.masked_fill(~((pos_mask+neg_mask).bool()), float('-inf'))
+            reg_score = torch.softmax(12*reg, dim=1).log()
+            reg_loss = -torch.sum(reg_score*pos_mask) / torch.sum(pos_mask)
+            # print("sr", sr, "reg", reg_score)
+            # exit()
+            return score, reg_loss
+        
         return score
 
         # phi = self.sc_sr[0](sr).unsqueeze(-1)
