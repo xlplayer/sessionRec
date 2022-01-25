@@ -1,3 +1,4 @@
+from turtle import forward
 from networkx.generators.random_graphs import fast_gnp_random_graph
 import torch
 import torch.nn as nn
@@ -610,16 +611,16 @@ class SessionGraph(nn.Module):
         b = F.normalize(b, dim=-1)
         
         logits = torch.matmul(sr, b.transpose(1, 0))
-        score = torch.softmax(12 * logits, dim=1).log()
+        score = torch.softmax(12 * logits, dim=1)#.log()
 
-        if training:
-            reg = torch.matmul(sr, sr.transpose(1, 0))
-            reg.masked_fill(~((pos_mask+neg_mask).bool()), float('-inf'))
-            reg_score = torch.softmax(12*reg, dim=1).log()
-            reg_loss = -torch.sum(reg_score*pos_mask) / torch.sum(pos_mask)
-            # print("sr", sr, "reg", reg_score)
-            # exit()
-            return score, reg_loss
+        # if training:
+        #     reg = torch.matmul(sr, sr.transpose(1, 0))
+        #     reg.masked_fill(~((pos_mask+neg_mask).bool()), float('-inf'))
+        #     reg_score = torch.softmax(12*reg, dim=1).log()
+        #     reg_loss = -torch.sum(reg_score*pos_mask) / torch.sum(pos_mask)
+        #     # print("sr", sr, "reg", reg_score)
+        #     # exit()
+        #     return score, reg_loss
         
         return score
 
@@ -647,3 +648,231 @@ class SessionGraph(nn.Module):
         # print(score.unsqueeze(1).shape, score_ex.unsqueeze(1).shape, phi.shape)
         score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
         return torch.log(score)
+    
+    def agg(self, h_v, b, g):
+        h_v = self.feat_drop(h_v)
+        h_v = F.normalize(h_v, dim=-1)
+        h_d = self.dis_embedding(g.edges['interacts'].data['dis'])
+        h_p = self.pos_embedding(g.edges['agg'].data['pid'])
+        h_r = self.target_embedding(g.nodes['target'].data['tid'])
+
+        sr = self.local_agg(h_v, h_d, h_p, h_r, g)
+        sr = F.normalize(sr, dim=-1)
+        b = F.normalize(b, dim=-1)
+        
+        logits = torch.matmul(sr, b.transpose(1, 0))
+        score = torch.softmax(12 * logits, dim=1)#.log()
+        
+        return score
+
+
+class DglAggregator2(nn.Module):
+    def __init__(self, dim, alpha):
+        super(DglAggregator2, self).__init__()
+        self.dim = dim
+
+        self.pi =  nn.Linear(self.dim, 1, bias=False)
+        self.pj = nn.Linear(self.dim, 1, bias=False)
+        self.q = nn.Linear(2*self.dim, self.dim, bias=False)
+        self.r = nn.Linear(2*self.dim, self.dim, bias=False)
+        self.M = nn.Linear(2*self.dim, 1, bias=False)
+        self.Two = nn.Linear(2*self.dim, 2)
+
+        self.leakyrelu = nn.LeakyReLU(alpha)
+        self.relu = nn.ReLU()
+        self.dropout_local = nn.Dropout(config.dropout_local)
+        self.dropout_attn = nn.Dropout(config.dropout_attn)
+        self.norm = nn.LayerNorm(self.dim)
+        # self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(config.dim)
+        for weight in self.parameters():
+            weight.data.uniform_(-stdv, stdv)
+
+    def forward(self, h_v, h_d, h_p, h_t, g):
+        with g.local_scope():
+            ###item to item
+            adj = g.edge_type_subgraph(['interacts'])
+            adj.nodes['item'].data['ft'] = h_v
+            adj.edges['interacts'].data['d'] = h_d
+            # adj.apply_edges(fn.u_mul_v('ft','ft','e'), etype='interacts')
+            adj.apply_edges(dis_u_mul_v, etype='interacts')
+            e = self.pi(adj.edges['interacts'].data['e'])
+            mask = torch.sigmoid(self.M(adj.edges['interacts'].data['mask']))
+            e = e * mask
+
+            adj.edges['interacts'].data['a'] = self.dropout_local(edge_softmax(adj['interacts'], e))
+            adj.update_all(fn.u_mul_e('ft', 'a', 'm'), fn.sum('m', 'ft'), etype='interacts')
+
+            ###agg
+            adj = g.edge_type_subgraph(['agg'])
+            adj.nodes['target'].data['ft'] = h_t
+            adj.edges['agg'].data['pos'] = h_p
+            adj.apply_edges(fn.copy_src('ft','ft'))
+            e = self.q(torch.cat([adj.edata['ft'], adj.edata['pos']], dim=-1))
+            adj.edata['e'] = torch.tanh(e)
+
+            last_nodes = adj.filter_nodes(lambda nodes: nodes.data['last']==1, ntype='item')
+            last_feat = adj.nodes['item'].data['ft'][last_nodes]
+            last_feat = last_feat.unsqueeze(1).repeat(1,config.order,1).view(-1, config.dim)
+            f = self.r(torch.cat([adj.nodes['target'].data['ft'], last_feat], dim=-1))
+            adj.nodes['target'].data['ft'] = f
+
+            adj.update_all(udf_agg, fn.sum('m', 'ft'))
+
+            return g.nodes['target'].data['ft']
+
+class SessionGraph2(nn.Module):
+    def __init__(self, num_node):
+        super(SessionGraph2, self).__init__()
+        self.num_node = num_node
+        print(self.num_node)
+
+        self.embedding = nn.Embedding(self.num_node, config.dim)
+        self.pos_embedding = nn.Embedding(200, config.dim)
+        self.len_embedding = nn.Embedding(200, config.dim)
+        self.dis_embedding = nn.Embedding(200, config.dim)
+        self.target_embedding = nn.Embedding(10, config.dim)
+        self.group_embedding = nn.Embedding(1, config.dim)
+        self.feat_drop = nn.Dropout(config.feat_drop*3)
+        
+        # Parameters        
+        # self.kmeans = Kmeans(1, config.dim, 10, 0.999, 1e-4)
+        self._handle = update_kmeans_on_backwards(self)
+
+        self.local_agg = DglAggregator2(config.dim, config.alpha)
+        self.w_1 = nn.Parameter(torch.Tensor(2 * config.dim, config.dim))
+        self.w_2 = nn.Parameter(torch.Tensor(config.dim, 1))
+        self.glu1 = nn.Linear(config.dim, config.dim)
+        self.glu2 = nn.Linear(config.dim, config.dim, bias=False)
+        self.alpha    = nn.Parameter(torch.Tensor(config.order))
+        self.phi = nn.Parameter(torch.Tensor(2))
+
+        self.sc_sr = nn.ModuleList()
+        for i in range(1):
+            self.sc_sr.append(nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1)))
+
+        # self.loss_function = nn.CrossEntropyLoss()
+        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
+        print('weight_decay:', config.weight_decay)
+        if config.weight_decay > 0:
+            params = fix_weight_decay(self)
+        else:
+            params = self.parameters()
+        self.optimizer = torch.optim.Adam(params, lr=config.lr, weight_decay=config.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
+
+        self.reset_parameters()
+        self.alpha.data = torch.zeros(config.order)
+        self.alpha.data[0] = torch.tensor(1.0)
+        self.phi.data[0] = 0
+        self.phi.data[1] = 1
+
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(config.dim)
+        for weight in self.parameters():
+            weight.data.uniform_(-stdv, stdv)
+        
+    
+    def forward(self, g, epoch=None, pos_mask=None, neg_mask=None, training=False):
+        h_v = self.embedding(g.nodes['item'].data['iid'])
+        h_v = self.feat_drop(h_v)
+        h_v = F.normalize(h_v, dim=-1)
+        
+        h_d = self.dis_embedding(g.edges['interacts'].data['dis'])
+
+        h_p = self.pos_embedding(g.edges['agg'].data['pid'])
+        h_r = self.target_embedding(g.nodes['target'].data['tid'])
+        sr = self.local_agg(h_v, h_d, h_p, h_r, g)
+        b = self.embedding.weight#[1:config.num_node]  # n_nodes x latent_size
+
+        sr = F.normalize(sr, dim=-1)
+        b = F.normalize(b, dim=-1)
+        
+        logits = torch.matmul(sr, b.transpose(1, 0))
+        score = torch.softmax(12 * logits, dim=1)#.log()
+        
+        return score
+    
+    def agg(self, h_v, b, g):
+        h_v = self.feat_drop(h_v)
+        h_v = F.normalize(h_v, dim=-1)
+        h_d = self.dis_embedding(g.edges['interacts'].data['dis'])
+        h_p = self.pos_embedding(g.edges['agg'].data['pid'])
+        h_r = self.target_embedding(g.nodes['target'].data['tid'])
+
+        sr = self.local_agg(h_v, h_d, h_p, h_r, g)
+        sr = F.normalize(sr, dim=-1)
+        b = F.normalize(b, dim=-1)
+        
+        logits = torch.matmul(sr, b.transpose(1, 0))
+        score = torch.softmax(12 * logits, dim=1)#.log()
+        
+        return score
+
+
+       
+
+class Ensamble(nn.Module):
+    def __init__(self, num_node):
+        super(Ensamble, self).__init__()
+        # self.embedding = nn.Embedding(num_node, config.dim)
+        # self.mix_weights = nn.Linear(2*config.dim, 2)
+
+        self.model1 = SessionGraph(num_node = num_node)
+        self.model2 = SessionGraph2(num_node = num_node)
+        self.phi = nn.Parameter(torch.Tensor(2))
+        self.loss = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
+
+        self.reset_parameters()
+        self.phi.data[0] = 0
+        self.phi.data[1] = 0
+
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(config.dim)
+        for weight in self.parameters():
+            weight.data.uniform_(-stdv, stdv)
+    
+    def forward(self, g, epoch=None, pos_mask=None, neg_mask=None, training=False):
+        
+
+        # with g.local_scope():
+        #     adj = g.edge_type_subgraph(['agg'])
+        #     adj.nodes['item'].data['ft1'] = self.model1.embedding(g.nodes['item'].data['iid'])
+        #     adj.nodes['item'].data['ft2'] = self.model2.embedding(g.nodes['item'].data['iid'])
+        #     # last_nodes = adj.filter_nodes(lambda nodes: nodes.data['last']==1, ntype='item')
+        #     # mean1 = adj.nodes['item'].data['ft1'][last_nodes]
+        #     # mean2 = adj.nodes['item'].data['ft2'][last_nodes]
+        #     adj.update_all(fn.copy_src('ft1','ft1'), fn.mean('ft1', 'mean1'))
+        #     adj.update_all(fn.copy_src('ft2','ft2'), fn.mean('ft2', 'mean2'))
+        #     mean1 = adj.nodes['target'].data['mean1']
+        #     mean2 = adj.nodes['target'].data['mean2']
+        #     phi = self.mix_weights(torch.cat([mean1, mean2], dim=-1))
+        #     phi = torch.softmax(phi, dim=-1)
+        #     phi = phi.unsqueeze(-1)
+
+        scores1 = self.model1(g, epoch, pos_mask, neg_mask, training)
+        scores2 = self.model2(g, epoch, pos_mask, neg_mask, training)
+
+        phi = torch.softmax(self.phi, dim=-1)
+        # print(phi)
+        phi = phi.unsqueeze(0).unsqueeze(-1).repeat(scores1.size(0),1,1)
+        score_mix = torch.sum(torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1)], dim=1) * phi, dim=1)
+
+        return [scores1, scores2, score_mix]
+
+    def loss_function(self, scores, targets):
+        scores1, scores2, score_mix = scores
+        score_cat = torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1)], dim=1)
+        loss1 = self.model1.loss_function(scores1.log(), targets)
+        loss2 = self.model2.loss_function(scores2.log(), targets)
+        loss_mix = self.loss(score_mix.log(), targets)
+
+        epsilon = 1e-8
+        score_mix = torch.unsqueeze(score_mix, 1)
+        kl_loss = torch.sum(score_mix * (torch.log(score_mix + epsilon) - torch.log(score_cat + epsilon)), dim=-1)
+        regularization_loss  = torch.mean(torch.sum(kl_loss, dim=-1), dim=-1)
+        return [loss1, loss2, loss_mix,  regularization_loss]

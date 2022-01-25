@@ -10,6 +10,7 @@ import config
 import copy
 import dgl
 import networkx as nx
+from tqdm import tqdm
 
 # class Data(Dataset):
 #     def __init__(self, data, edge2idx, edge2fre, adj, is_train=True):
@@ -161,7 +162,11 @@ def create_index(sessions):
 
 
 class AugmentedDataset:
-    def __init__(self, sessions, G, sort_by_length=False, NCE=False, training=False):
+    def __init__(self, sessions, G, sort_by_length=False, NCE=False, training=False, epoch=None):
+        # if training and epoch is not None and epoch == 0:
+        #     print("hhh")            
+        #     sessions = np.array([list(reversed(s)) for s in sessions[-150000:]])
+
         self.sessions = sessions
         self.G = G
         # self.graphs = graphs
@@ -172,22 +177,33 @@ class AugmentedDataset:
             ind = np.argsort(index[:, 1])[::-1]
             index = index[ind]
         
-        # if NCE:
-        self.target2idx = defaultdict(list)
-        for i, (sid,lidx) in enumerate(index):
-            target = self.sessions[sid][lidx]
-            self.target2idx[target].append(i)
+        # if training:
+        #     self.target2idx = defaultdict(list)
+        #     for i, (sid,lidx) in enumerate(index):
+        #         for item in self.sessions[sid][:lidx+1]:
+        #             if len(self.target2idx[item])==0 or self.target2idx[item][-1] != i:
+        #                 self.target2idx[item].append(i)
 
-        if training:
-            ind = []
-            for i, (sid,lidx) in enumerate(index):
-                target = self.sessions[sid][lidx]
-                if self.target2idx[target].index(i) >= min(0.5*len(self.target2idx[target]), len(self.target2idx[target])-100):
-                    ind.append(i)
-            index = index[ind]
-        # y = [self.sessions[sid][lidx] for sid,lidx in index]
-        # ind = np.argsort(y)
-        # index = index[ind]
+        #     flags = [0] * len(index)
+        #     for v in tqdm(self.target2idx.values()):
+        #         l = max(100, len(v)//2)
+        #         for id in set(v[-l:]):
+        #             flags[id] = 1
+
+        #     ind = []
+        #     for i, (sid,lidx) in enumerate(index):
+        #         if flags[i]:
+        #             ind.append(i)
+        #     index = index[ind]
+
+        # if not training:
+        #     y = [self.sessions[sid][lidx] for sid,lidx in index]
+        #     ind = np.argsort(y)
+        #     of = open("log_test.txt", 'w')
+        #     for i in ind:
+        #         sid, lidx = index[i]
+        #         print(self.sessions[sid][:lidx], self.sessions[sid][lidx], file=of)
+        #     exit()
         
         self.index = index
 

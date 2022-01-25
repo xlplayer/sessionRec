@@ -8,7 +8,7 @@ import numpy as np
 import random
 import pickle
 from tqdm import tqdm
-from model import SessionGraph,Transformer
+from model import SessionGraph,Transformer, Ensamble
 from utils import Data
 import torch.nn.functional as F
 import networkx as nx
@@ -44,11 +44,12 @@ def collate_fn(samples):
     g = dgl.batch(g)
     return g, torch.tensor(target)
 
-def train_test(model, train_data, test_data, epoch):
+def train_test(model, train_data, test_data, epoch, train_sessions):
     print('start training: ', datetime.datetime.now())
     model.train()
 
     total_loss = 0.0
+    train_data = AugmentedDataset(train_sessions, G, training=True, epoch=epoch)
     train_loader = torch.utils.data.DataLoader(train_data, num_workers=20, batch_size=config.batch_size,
                                                shuffle=False, pin_memory=True, collate_fn=collate_fn)
     
@@ -60,12 +61,17 @@ def train_test(model, train_data, test_data, epoch):
             targets = trans_to_cuda(target).long()
             neg_mask = (targets.unsqueeze(0) != targets.unsqueeze(1)).float()
             pos_mask = (targets.unsqueeze(0) == targets.unsqueeze(1)).float() -torch.eye(targets.shape[0]).cuda()
-            scores, reg_loss =  model(g, epoch, pos_mask, neg_mask, training=True)
-            assert not torch.isnan(scores).any()
+            scores =  model(g, epoch, pos_mask, neg_mask, training=True)
+            assert not torch.isnan(scores[-1]).any() #mix
 
             # loss = F.nll_loss(scores, targets)
-            loss = model.loss_function(scores, targets) #+ reg_loss*0.02
-            t.set_postfix(loss = loss.item(), reg_loss=reg_loss.item(), lr = model.optimizer.state_dict()['param_groups'][0]['lr'])
+            loss1, loss2, loss_mix, regularization_loss = model.loss_function(scores, targets)
+            loss = loss1 + loss2 + loss_mix +  regularization_loss
+            t.set_postfix(
+                        loss = loss.item(),
+                        loss_mix = loss_mix.item(),
+                        regularization_loss = regularization_loss.item(), 
+                        lr = model.optimizer.state_dict()['param_groups'][0]['lr'])
             loss.backward()
             model.optimizer.step()
             total_loss += loss
@@ -87,8 +93,10 @@ def train_test(model, train_data, test_data, epoch):
         g = g.to(torch.device('cuda'))
         targets = trans_to_cuda(target).long()
         scores =  model(g, epoch)
+
+        scores = scores[-1] ###mix score
         assert not torch.isnan(scores).any()
-        
+
         sub_scores = scores.topk(20)[1]
         sub_scores = trans_to_cpu(sub_scores).detach().numpy()
         targets = target.numpy()
@@ -159,7 +167,7 @@ if __name__ == "__main__":
     # train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
     # test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
 
-    model = trans_to_cuda(SessionGraph(num_node = config.num_node))
+    model = trans_to_cuda(Ensamble(num_node = config.num_node))
 
     start = time.time()
     best_result = [0, 0, 0, 0, 0, 0]
@@ -169,7 +177,7 @@ if __name__ == "__main__":
     for epoch in range(config.epoch):
         print('-------------------------------------------------------')
         print('epoch: ', epoch)
-        hit5, hit10, hit20, mrr5, mrr10, mrr20 = train_test(model, train_data, test_data, epoch)
+        hit5, hit10, hit20, mrr5, mrr10, mrr20 = train_test(model, train_data, test_data, epoch, train_sessions)
         if hit5 >= best_result[0]:
             best_result[0] = hit5
             best_epoch[0] = epoch
