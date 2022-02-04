@@ -17,22 +17,7 @@ opt = parser.parse_args()
 
 dataset = opt.dataset
 
-all_train_seq = pickle.load(open('/home/xl/lxl/dataset/' + dataset + "/" + dataset + '/all_train_seq.txt', 'rb'))
-
-def read_sessions(filepath):
-    sessions = pd.read_csv(filepath, sep='\t', header=None, squeeze=True)
-    sessions = sessions.apply(lambda x: list(map(int, x.split(',')))).values
-    return sessions
-
-def read_dataset(dataset_dir):
-    train_sessions = read_sessions(dataset_dir / 'train.txt')
-    test_sessions = read_sessions(dataset_dir / 'test.txt')
-    with open(dataset_dir / 'num_items.txt', 'r') as f:
-        num_items = int(f.readline())
-    return train_sessions, test_sessions, num_items
-from pathlib import Path
-train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/diginetica"))
-all_train_seq = train_sessions
+# all_train_seq = pickle.load(open('/home/xl/lxl/dataset/' + dataset + "/" + dataset + '/all_train_seq.txt', 'rb'))
 
 # nodes = set()
 # edges = set()
@@ -67,15 +52,30 @@ all_train_seq = train_sessions
 # pickle.dump(edge2idx, open('/home/xl/lxl/dataset/' + dataset + "/" + dataset + '/edge2idx.pkl',"wb"))
 # pickle.dump(edge2fre, open('/home/xl/lxl/dataset/' + dataset + "/" + dataset + '/edge2fre.pkl',"wb"))
 
-G_n = nx.Graph()
-for s in tqdm(all_train_seq):
-    for i in range(0,len(s)-1):
-        # for j in range(i+1, len(s)):
-        try:
-            G_n[s[i]][s[i+1]]['weight']+=1
-        except Exception:
-            G_n.add_edge(s[i],s[i+1], weight=1)
+def read_sessions(filepath):
+    sessions = pd.read_csv(filepath, sep='\t', header=None, squeeze=True)
+    sessions = sessions.apply(lambda x: list(map(int, x.split(',')))).values
+    return sessions
 
+def read_dataset(dataset_dir):
+    train_sessions = read_sessions(dataset_dir / 'train.txt')
+    test_sessions = read_sessions(dataset_dir / 'test.txt')
+    with open(dataset_dir / 'num_items.txt', 'r') as f:
+        num_items = int(f.readline())
+    return train_sessions, test_sessions, num_items
+from pathlib import Path
+train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/diginetica"))
+all_train_seq = test_sessions
+
+G_n = nx.MultiDiGraph()
+for t,s in tqdm(enumerate(all_train_seq), total=len(all_train_seq)):
+    for i in range(1, 2):
+        src = s[:-i]
+        dst = s[i:]
+        G_n.add_edges_from(set(zip(src,dst)), time=t)
+        G_n.add_edges_from(set(zip(dst,src)), time=t)
+
+print(G_n[1])
 print(len(G_n.nodes()), len(G_n.edges()))
 
 pickle.dump(G_n, open('/home/xl/lxl/model/DGL/data/'+dataset+'_adj.pkl',"wb"))

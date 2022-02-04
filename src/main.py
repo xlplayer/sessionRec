@@ -8,7 +8,7 @@ import numpy as np
 import random
 import pickle
 from tqdm import tqdm
-from model import SessionGraph,Transformer, Ensamble
+from model import SessionGraph,Transformer, Ensamble, SessionGraph3
 from utils import Data
 import torch.nn.functional as F
 import networkx as nx
@@ -41,7 +41,17 @@ def trans_to_cpu(variable):
 
 def collate_fn(samples):
     g, target = zip(*samples)
+    # edges = []
+    # for i in range(len(target)):
+    #     edges.append((i,i))
+    #     for j in range(i+1, len(target)):
+    #         if target[i]==target[j]:
+    #             edges.append((i,j))
+    
     g = dgl.batch(g)
+    # src,dst = zip(*edges)
+    # g.add_edges(src, dst, etype='overlap')
+    # g.add_edges(dst, src, etype='overlap')
     return g, torch.tensor(target)
 
 def train_test(model, train_data, test_data, epoch, train_sessions):
@@ -49,7 +59,6 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     model.train()
 
     total_loss = 0.0
-    train_data = AugmentedDataset(train_sessions, G, training=True, epoch=epoch)
     train_loader = torch.utils.data.DataLoader(train_data, num_workers=20, batch_size=config.batch_size,
                                                shuffle=False, pin_memory=True, collate_fn=collate_fn)
     
@@ -62,15 +71,16 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
             neg_mask = (targets.unsqueeze(0) != targets.unsqueeze(1)).float()
             pos_mask = (targets.unsqueeze(0) == targets.unsqueeze(1)).float() -torch.eye(targets.shape[0]).cuda()
             scores =  model(g, epoch, pos_mask, neg_mask, training=True)
-            assert not torch.isnan(scores[-1]).any() #mix
+            assert not torch.isnan(scores).any() #mix
 
             # loss = F.nll_loss(scores, targets)
-            loss1, loss2, loss_mix, regularization_loss = model.loss_function(scores, targets)
-            loss = loss1 + loss2 + loss_mix +  regularization_loss
+            loss = model.loss_function(scores, targets)
+            # loss1, loss2, loss_mix, regularization_loss = model.loss_function(scores, targets)
+            # loss = loss1 + loss2 + loss_mix +  regularization_loss
             t.set_postfix(
                         loss = loss.item(),
-                        loss_mix = loss_mix.item(),
-                        regularization_loss = regularization_loss.item(), 
+                        # loss_mix = loss_mix.item(),
+                        # regularization_loss = regularization_loss.item(), 
                         lr = model.optimizer.state_dict()['param_groups'][0]['lr'])
             loss.backward()
             model.optimizer.step()
@@ -82,7 +92,7 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     print('start predicting: ', datetime.datetime.now())
     model.eval()
     test_loader = torch.utils.data.DataLoader(test_data, num_workers=20, batch_size=config.batch_size,
-                                              shuffle=False, pin_memory=True, collate_fn=collate_fn)
+                                              shuffle=True, pin_memory=True, collate_fn=collate_fn)
     result = []
     hit20, mrr20 = [], []
     hit10, mrr10 = [], []
@@ -94,7 +104,7 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
         targets = trans_to_cuda(target).long()
         scores =  model(g, epoch)
 
-        scores = scores[-1] ###mix score
+        # scores = scores[-1] ###mix score
         assert not torch.isnan(scores).any()
 
         sub_scores = scores.topk(20)[1]
@@ -134,27 +144,6 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
 
     return result
 
-import pandas as pd
-def read_sessions(filepath):
-    sessions = pd.read_csv(filepath, sep='\t', header=None, squeeze=True)
-    sessions = sessions.apply(lambda x: list(map(int, x.split(',')))).values
-    return sessions
-
-def read_dataset(dataset_dir):
-    train_sessions = read_sessions(dataset_dir / 'train.txt')
-    test_sessions = read_sessions(dataset_dir / 'test.txt')
-    with open(dataset_dir / 'num_items.txt', 'r') as f:
-        num_items = int(f.readline())
-    return train_sessions, test_sessions, num_items
-
-from pathlib import Path
-from utils import AugmentedDataset
-train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/diginetica"))
-config.num_node = num_items
-G = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', 'rb'))
-train_data = AugmentedDataset(train_sessions, G, training=True)
-test_data = AugmentedDataset(test_sessions, G, training=False)
-
 if __name__ == "__main__":
     print(config.dataset, config.num_node, "lr:",config.lr, "lr_dc:",config.lr_dc, "lr_dc_step:",config.lr_dc_step, "dropout_local:",config.dropout_local)
     init_seed(42)
@@ -167,7 +156,28 @@ if __name__ == "__main__":
     # train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
     # test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
 
-    model = trans_to_cuda(Ensamble(num_node = config.num_node))
+    model = trans_to_cuda(SessionGraph(num_node = config.num_node))
+
+    import pandas as pd
+    def read_sessions(filepath):
+        sessions = pd.read_csv(filepath, sep='\t', header=None, squeeze=True)
+        sessions = sessions.apply(lambda x: list(map(int, x.split(',')))).values
+        return sessions
+
+    def read_dataset(dataset_dir):
+        train_sessions = read_sessions(dataset_dir / 'train.txt')
+        test_sessions = read_sessions(dataset_dir / 'test.txt')
+        with open(dataset_dir / 'num_items.txt', 'r') as f:
+            num_items = int(f.readline())
+        return train_sessions, test_sessions, num_items
+
+    from pathlib import Path
+    from utils import AugmentedDataset
+    train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/diginetica"))
+    config.num_node = num_items
+    G = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', 'rb'))
+    train_data = AugmentedDataset(train_sessions, G, training=True, train_len=len(train_sessions))
+    test_data = AugmentedDataset(test_sessions, G, training=False, train_len=len(train_sessions))
 
     start = time.time()
     best_result = [0, 0, 0, 0, 0, 0]

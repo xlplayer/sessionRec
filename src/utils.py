@@ -162,13 +162,15 @@ def create_index(sessions):
 
 
 class AugmentedDataset:
-    def __init__(self, sessions, G, sort_by_length=False, NCE=False, training=False, epoch=None):
+    def __init__(self, sessions, G, sort_by_length=False, NCE=False, training=False, epoch=None, train_len=None):
         # if training and epoch is not None and epoch == 0:
         #     print("hhh")            
         #     sessions = np.array([list(reversed(s)) for s in sessions[-150000:]])
-
+        self.training = training
         self.sessions = sessions
         self.G = G
+        self.train_len = train_len
+        print(self.train_len)
         # self.graphs = graphs
         index = create_index(self.sessions)  # columns: sessionId, labelIndex
 
@@ -219,7 +221,8 @@ class AugmentedDataset:
 
         graph_data = {
             ('item', 'interacts', 'item'):([],[]),
-            ('item', 'agg', 'target'):([],[])
+            ('item', 'agg', 'target'):([],[]),
+            ('target', 'overlap', 'target'):([],[])
         }
         g = dgl.heterograph(graph_data)
         
@@ -232,9 +235,14 @@ class AugmentedDataset:
 
         seq_nid = [item2id[item] for item in seq]
         g.add_edges(list(set(seq_nid)), list(set(seq_nid)), {'dis': torch.zeros(len(list(set(seq_nid))), dtype=torch.long)}, etype='interacts')
+        
+        # if self.training:
+        #     threshold = self.train_len
+        # else:
+        #     threshold = self.train_len
 
-        # EDGES = set([(item2id[e[0]], item2id[e[1]]) for e in self.G.subgraph(items).edges(data='weight') if e[2]>1]) | set([(item2id[e[1]], item2id[e[0]]) for e in self.G.subgraph(items).edges(data='weight') if e[2]>1])
-        for i in range(1, 2):
+        # EDGES = set([(item2id[e[0]], item2id[e[1]]) for e in self.G.subgraph(items).edges(data='time')])# if e[2]<threshold]) 
+        for i in [1]:
             src = seq_nid[:-i]
             dst = seq_nid[i:]
 
@@ -243,27 +251,19 @@ class AugmentedDataset:
                 src, dst = zip(*edges)
                 g.add_edges(src, dst, {'dis':(2*i)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
                 g.add_edges(dst, src, {'dis':(2*i-1)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
+                
             # EDGES = EDGES - set(zip(src,dst)) - set(zip(dst,src)) - set(zip(seq_nid,seq_nid))
         
-        # # print(seq, edges, self.G.subgraph(items).edges())
-        # if len(EDGES) > 0:
-        #     src, dst = zip(*EDGES)
-        #     g.add_edges(src, dst, {'dis':100*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
+        # # # print(seq, edges, self.G.subgraph(items).edges())
+        # if not self.training:
+        #     if len(EDGES) > 0:
+        #         src, dst = zip(*EDGES)
+        #         g.add_edges(src, dst, {'dis':100*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
 
         #agg
-        g = dgl.add_nodes(g, config.order, ntype='target')
-        g.nodes['target'].data['tid'] = torch.tensor(list(range(config.order)))
-        for i in range(config.order):
-            if i==0 or i>=len(seq_nid):
-                seq_nid_tmp = seq_nid
-            else:
-                seq_nid_tmp = seq_nid[:-i]
-            
-            tmp = [0]*len(seq_nid_tmp)
-            for t in range(len(seq_nid_tmp)):
-                tmp[t] = t
-            g.add_edges(seq_nid_tmp, [i]*len(seq_nid_tmp), {'pid':torch.tensor(tmp)}, etype='agg')
-
+        g = dgl.add_nodes(g, 1, ntype='target')
+        g.nodes['target'].data['tid'] = torch.tensor([0])
+        g.add_edges(seq_nid, [0]*len(seq_nid), {'pid':torch.tensor(list(range(len(seq_nid))))}, etype='agg')
         return g, target
 
     def __len__(self):
