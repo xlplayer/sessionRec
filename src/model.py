@@ -562,7 +562,7 @@ class SessionGraph(nn.Module):
             self.sc_sr.append(nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1)))
 
         # self.loss_function = nn.CrossEntropyLoss()
-        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, ignore_index=0, reduction='mean')
+        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
         print('weight_decay:', config.weight_decay)
         if config.weight_decay > 0:
             params = fix_weight_decay(self)
