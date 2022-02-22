@@ -20,6 +20,7 @@ from label_smooth import LabelSmoothSoftmaxCEV1
 def udf_agg(edges):
     return {'m':edges.src['ft']*torch.sum(edges.data['e'] * edges.dst['ft'], dim=-1, keepdim=True)}
 
+
 def dis_u_mul_v(edges):
     return {'e': edges.src['ft']*edges.dst['ft']*edges.data['d'],'mask':torch.cat([edges.src['ft']*edges.dst['ft'], edges.data['d']], dim=-1)}
     return {'e':edges.src['ft']*edges.dst['ft']*edges.data['d'], 'sim': torch.sigmoid(torch.sum(edges.src['ft']*edges.dst['ft'], dim=-1))}
@@ -638,7 +639,7 @@ class SessionGraph(nn.Module):
         b = F.normalize(b, dim=-1)
         
         logits = torch.matmul(sr, b.transpose(1, 0))
-        score = torch.softmax(12 * logits, dim=1).log()
+        score = torch.softmax(12 * logits, dim=1)#.log()
 
         # if training:
         #     reg = torch.matmul(sr, sr.transpose(1, 0))
@@ -992,6 +993,155 @@ class SessionGraph3(nn.Module):
         loss2 = self.loss(scores2.log(), targets)
         loss_mix = self.loss(score_mix.log(), targets)
 
+        epsilon = 1e-8
+        score_mix = torch.unsqueeze(score_mix, 1)
+        kl_loss = torch.sum(score_mix * (torch.log(score_mix + epsilon) - torch.log(score_cat + epsilon)), dim=-1)
+        regularization_loss  = torch.mean(torch.sum(kl_loss, dim=-1), dim=-1)
+        return [loss1, loss2, loss_mix,  regularization_loss]
+
+
+class Pretrain_SessionGraph(nn.Module):
+    def __init__(self, num_node):
+        super(Pretrain_SessionGraph, self).__init__()
+        self.num_node = num_node
+        print(self.num_node)
+
+        self.embedding = nn.Embedding(self.num_node, config.dim)
+        # self.embedding_k = nn.Embedding(self.num_node, config.dim)
+        self.pos_embedding = nn.Embedding(200, config.dim)
+        self.len_embedding = nn.Embedding(200, config.dim)
+        self.dis_embedding = nn.Embedding(200, config.dim)
+        self.target_embedding = nn.Embedding(10, config.dim)
+        self.group_embedding = nn.Embedding(1, config.dim)
+        self.feat_drop = nn.Dropout(config.feat_drop)
+        
+        # Parameters        
+        # self.kmeans = Kmeans(1, config.dim, 10, 0.999, 1e-4)
+        self._handle = update_kmeans_on_backwards(self)
+
+        self.local_agg = DglAggregator(config.dim, config.alpha)
+        # self.global_agg = SessionAggregator(config.dim)
+
+        self.w_1 = nn.Parameter(torch.Tensor(2 * config.dim, config.dim))
+        self.w_2 = nn.Parameter(torch.Tensor(config.dim, 1))
+        self.glu1 = nn.Linear(config.dim, config.dim)
+        self.glu2 = nn.Linear(config.dim, config.dim, bias=False)
+        self.alpha    = nn.Parameter(torch.Tensor(config.order))
+        self.phi = nn.Parameter(torch.Tensor(2))
+
+        self.sc_sr = nn.ModuleList()
+        for i in range(1):
+            self.sc_sr.append(nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1)))
+
+        # self.loss_function = nn.CrossEntropyLoss()
+        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
+        print('weight_decay:', config.weight_decay)
+        if config.weight_decay > 0:
+            params = fix_weight_decay(self)
+        else:
+            params = self.parameters()
+        self.optimizer = torch.optim.Adam(params, lr=config.lr, weight_decay=config.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
+
+        self.reset_parameters()
+        self.alpha.data = torch.zeros(config.order)
+        self.alpha.data[0] = torch.tensor(1.0)
+        self.phi.data[0] = 0
+        self.phi.data[1] = 1
+
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(config.dim)
+        for weight in self.parameters():
+            weight.data.uniform_(-stdv, stdv)
+        
+    
+    def forward(self, g1, g2, temp=0.1):
+        srs = []
+        for g in [g1, g2]:
+            h_v = self.embedding(g.nodes['item'].data['iid'])
+            h_v = self.feat_drop(h_v)
+            h_v = F.normalize(h_v, dim=-1)
+            h_d = self.dis_embedding(g.edges['interacts'].data['dis'])
+            h_p = self.pos_embedding(g.edges['agg'].data['pid'])
+            h_r = self.target_embedding(g.nodes['target'].data['tid'])
+            sr = self.local_agg(h_v, h_d, h_p, h_r, g)
+            sr = F.normalize(sr, dim=-1)
+            srs.append(sr)
+        ori_vector, arg_vector = srs
+        sim_matrix_tmp2 = sim_matrix2(ori_vector, arg_vector, temp=temp)
+        row_softmax = nn.LogSoftmax(dim=1) 
+        row_softmax_matrix = -row_softmax(sim_matrix_tmp2)
+        
+        colomn_softmax = nn.LogSoftmax(dim=0)
+        colomn_softmax_matrix = -colomn_softmax(sim_matrix_tmp2)
+        
+        row_diag_sum = compute_diag_sum(row_softmax_matrix)
+        colomn_diag_sum = compute_diag_sum(colomn_softmax_matrix)
+        contrastive_loss = (row_diag_sum + colomn_diag_sum) / (2 * len(row_softmax_matrix))
+
+        return contrastive_loss
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+sim matrix
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+def sim_matrix2(ori_vector, arg_vector, temp=1.0):
+    
+    for i in range(len(ori_vector)):
+        sim = torch.cosine_similarity(ori_vector[i].unsqueeze(0), arg_vector, dim=1) * (1/temp)
+        if i == 0:
+            sim_tensor = sim.unsqueeze(0)
+        else:
+            sim_tensor = torch.cat((sim_tensor, sim.unsqueeze(0)), 0)
+    return sim_tensor
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+compute
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+def compute_diag_sum(tensor):
+    num = len(tensor)
+    diag_sum = 0
+    for i in range(num):
+        diag_sum += tensor[i][i]
+    return diag_sum
+
+class Two_SessionGraph(nn.Module):
+    def __init__(self, num_node):
+        super(Two_SessionGraph, self).__init__()
+
+        self.model1 = SessionGraph(num_node = num_node)
+        self.model2 = SessionGraph2(num_node = num_node)
+        self.phi = nn.Parameter(torch.Tensor(2))
+        self.loss = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
+
+        self.reset_parameters()
+        self.phi.data[0] = 0
+        self.phi.data[1] = 0
+
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(config.dim)
+        for weight in self.parameters():
+            weight.data.uniform_(-stdv, stdv)
+    
+    def forward(self, g1, g2, epoch=None, pos_mask=None, neg_mask=None, training=False):
+
+        scores1 = self.model1(g1, epoch, pos_mask, neg_mask, training)
+        scores2 = self.model2(g2, epoch, pos_mask, neg_mask, training)
+
+        phi = torch.softmax(self.phi, dim=-1)
+        # print(phi)
+        phi = phi.unsqueeze(0).unsqueeze(-1).repeat(scores1.size(0),1,1)
+        score_mix = torch.sum(torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1)], dim=1) * phi, dim=1)
+
+        return [scores1, scores2, score_mix]
+
+    def loss_function(self, scores, targets):
+        scores1, scores2, score_mix = scores
+        score_cat = torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1)], dim=1)
+        loss1 = self.model1.loss_function(scores1.log(), targets)
+        loss2 = self.model2.loss_function(scores2.log(), targets)
+        loss_mix = self.loss(score_mix.log(), targets)
         epsilon = 1e-8
         score_mix = torch.unsqueeze(score_mix, 1)
         kl_loss = torch.sum(score_mix * (torch.log(score_mix + epsilon) - torch.log(score_cat + epsilon)), dim=-1)

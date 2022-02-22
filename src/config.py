@@ -1,7 +1,7 @@
 dataset = 'diginetica'
 num_node = 43098
 dim =256
-epoch = 20
+epoch = 10
 activate = 'relu'
 batch_size = 512
 lr = 0.001

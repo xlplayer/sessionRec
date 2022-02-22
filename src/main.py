@@ -8,7 +8,7 @@ import numpy as np
 import random
 import pickle
 from tqdm import tqdm
-from model import SessionGraph,Transformer, Ensamble, SessionGraph3
+from model import SessionGraph,Transformer, Ensamble, SessionGraph3, Two_SessionGraph
 from utils import Data
 import torch.nn.functional as F
 import networkx as nx
@@ -40,7 +40,7 @@ def trans_to_cpu(variable):
 
 
 def collate_fn(samples):
-    g, target = zip(*samples)
+    g1, g2, target = zip(*samples)
     # edges = []
     # for i in range(len(target)):
     #     edges.append((i,i))
@@ -48,11 +48,12 @@ def collate_fn(samples):
     #         if target[i]==target[j]:
     #             edges.append((i,j))
     
-    g = dgl.batch(g)
+    g1 = dgl.batch(g1)
+    g2 = dgl.batch(g2)
     # src,dst = zip(*edges)
     # g.add_edges(src, dst, etype='overlap')
     # g.add_edges(dst, src, etype='overlap')
-    return g, torch.tensor(target)
+    return g1, g2, torch.tensor(target)
 
 def train_test(model, train_data, test_data, epoch, train_sessions):
     print('start training: ', datetime.datetime.now())
@@ -65,22 +66,23 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     with tqdm(train_loader) as t:
         for data in t:
             model.optimizer.zero_grad()
-            g, target = data
-            g = g.to(torch.device('cuda'))
+            g1, g2, target = data
+            g1 = g1.to(torch.device('cuda'))
+            g2 = g2.to(torch.device('cuda'))
             targets = trans_to_cuda(target).long()
             neg_mask = (targets.unsqueeze(0) != targets.unsqueeze(1)).float()
             pos_mask = (targets.unsqueeze(0) == targets.unsqueeze(1)).float() -torch.eye(targets.shape[0]).cuda()
-            scores =  model(g, epoch, pos_mask, neg_mask, training=True)
-            assert not torch.isnan(scores).any() #mix
+            scores =  model(g1, g2, epoch, pos_mask, neg_mask, training=True)
+            assert not torch.isnan(scores[-1]).any() #mix
 
             # loss = F.nll_loss(scores, targets)
-            loss = model.loss_function(scores, targets)
-            # loss1, loss2, loss_mix, regularization_loss = model.loss_function(scores, targets)
-            # loss = loss1 + loss2 + loss_mix +  regularization_loss
+            # loss = model.loss_function(scores, targets)
+            loss1, loss2, loss_mix, regularization_loss = model.loss_function(scores, targets)
+            loss = loss1 + loss2 + loss_mix +  regularization_loss
             t.set_postfix(
                         loss = loss.item(),
-                        # loss_mix = loss_mix.item(),
-                        # regularization_loss = regularization_loss.item(), 
+                        loss_mix = loss_mix.item(),
+                        regularization_loss = regularization_loss.item(), 
                         lr = model.optimizer.state_dict()['param_groups'][0]['lr'])
             loss.backward()
             model.optimizer.step()
@@ -99,12 +101,13 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     hit5, mrr5 = [], []
     for data in test_loader:
         model.optimizer.zero_grad()
-        g, target = data
-        g = g.to(torch.device('cuda'))
+        g1, g2, target = data
+        g1 = g1.to(torch.device('cuda'))
+        g2 = g2.to(torch.device('cuda'))
         targets = trans_to_cuda(target).long()
-        scores =  model(g, epoch)
+        scores =  model(g1, g2, epoch)
 
-        # scores = scores[-1] ###mix score
+        scores = scores[-1] ###mix score
         assert not torch.isnan(scores).any()
 
         sub_scores = scores.topk(20)[1]
@@ -144,6 +147,28 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
 
     return result
 
+import pandas as pd
+def read_sessions(filepath):
+    sessions = pd.read_csv(filepath, sep='\t', header=None, squeeze=True)
+    sessions = sessions.apply(lambda x: list(map(int, x.split(',')))).values
+    return sessions
+
+def read_dataset(dataset_dir):
+    train_sessions = read_sessions(dataset_dir / 'train.txt')
+    test_sessions = read_sessions(dataset_dir / 'test.txt')
+    with open(dataset_dir / 'num_items.txt', 'r') as f:
+        num_items = int(f.readline())
+    return train_sessions, test_sessions, num_items
+
+from pathlib import Path
+from utils import Two_AugmentedDataset
+train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/diginetica"))
+config.num_node = num_items
+G = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', 'rb'))
+train_data = Two_AugmentedDataset(train_sessions, G, training=True, train_len=len(train_sessions))
+test_data = Two_AugmentedDataset(test_sessions, G, training=False, train_len=len(train_sessions))
+
+
 if __name__ == "__main__":
     print(config.dataset, config.num_node, "lr:",config.lr, "lr_dc:",config.lr_dc, "lr_dc_step:",config.lr_dc_step, "dropout_local:",config.dropout_local)
     init_seed(42)
@@ -156,29 +181,12 @@ if __name__ == "__main__":
     # train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
     # test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
 
-    model = trans_to_cuda(SessionGraph(num_node = config.num_node))
-
-    import pandas as pd
-    def read_sessions(filepath):
-        sessions = pd.read_csv(filepath, sep='\t', header=None, squeeze=True)
-        sessions = sessions.apply(lambda x: list(map(int, x.split(',')))).values
-        return sessions
-
-    def read_dataset(dataset_dir):
-        train_sessions = read_sessions(dataset_dir / 'train.txt')
-        test_sessions = read_sessions(dataset_dir / 'test.txt')
-        with open(dataset_dir / 'num_items.txt', 'r') as f:
-            num_items = int(f.readline())
-        return train_sessions, test_sessions, num_items
-
-    from pathlib import Path
-    from utils import AugmentedDataset
-    train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/diginetica"))
-    config.num_node = num_items
-    G = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', 'rb'))
-    train_data = AugmentedDataset(train_sessions, G, training=True, train_len=len(train_sessions))
-    test_data = AugmentedDataset(test_sessions, G, training=False, train_len=len(train_sessions))
-
+    model = trans_to_cuda(Two_SessionGraph(num_node = config.num_node))
+    # checkpoint = torch.load('/home/xl/lxl/model/DGL/data/'+config.dataset+"_model.pkl")
+    # model_dict = model.state_dict()
+    # state_dict = {k:v for k,v in checkpoint.items() if k in model_dict.keys()}
+    # model.load_state_dict(state_dict)
+    
     start = time.time()
     best_result = [0, 0, 0, 0, 0, 0]
     best_epoch = [0, 0, 0, 0, 0, 0]

@@ -268,3 +268,130 @@ class AugmentedDataset:
 
     def __len__(self):
         return len(self.index)
+
+
+class Pretrain_AugmentedDataset:
+    def __init__(self, sessions):
+        self.sessions = sessions
+        index = create_index(self.sessions)  # columns: sessionId, labelIndex
+        self.index = index
+
+    def __getitem__(self, idx):
+        #print(idx)
+        sid, lidx = self.index[idx]
+        seq_all = list(reversed(self.sessions[sid][:lidx+1]))
+
+        seqs = [seq_all[:-1], seq_all[1:]]
+        gs = []
+        for i in range(2):
+            seq = seqs[i]
+            items = list(np.unique(seq))
+            item2id = {n:i for i,n in enumerate(items)}
+
+            graph_data = {
+                ('item', 'interacts', 'item'):([],[]),
+                ('item', 'agg', 'target'):([],[]),
+                ('target', 'overlap', 'target'):([],[])
+            }
+            g = dgl.heterograph(graph_data)
+            
+            g = dgl.add_nodes(g, len(items), ntype='item')
+            g.nodes['item'].data['iid'] = torch.tensor(items)
+            g.nodes['item'].data['pid'] = torch.tensor(list(range(len(items))))
+            is_last = np.zeros(len(items))
+            is_last[item2id[seq[0]]] = 1
+            g.nodes['item'].data['last'] = torch.tensor(is_last)
+
+            seq_nid = [item2id[item] for item in seq]
+            g.add_edges(list(set(seq_nid)), list(set(seq_nid)), {'dis': torch.zeros(len(list(set(seq_nid))), dtype=torch.long)}, etype='interacts')
+        
+            for i in [1]:
+                src = seq_nid[:-i]
+                dst = seq_nid[i:]
+
+                edges = set(zip(src,dst))
+                if len(edges):
+                    src, dst = zip(*edges)
+                    g.add_edges(src, dst, {'dis':(2*i)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
+                    g.add_edges(dst, src, {'dis':(2*i-1)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')    
+
+            #agg
+            g = dgl.add_nodes(g, 1, ntype='target')
+            g.nodes['target'].data['tid'] = torch.tensor([0])
+            pos = np.array(range(len(seq_nid)))
+            g.add_edges(seq_nid, [0]*(len(seq_nid)), {'pid':torch.tensor(pos)}, etype='agg')
+            
+            gs.append(g)
+
+        return gs[0], gs[1]
+
+    def __len__(self):
+        return len(self.index)
+
+
+class Two_AugmentedDataset:
+    def __init__(self, sessions, G, sort_by_length=False, NCE=False, training=False, epoch=None, train_len=None):
+        self.training = training
+        self.sessions = sessions
+        self.G = G
+        self.train_len = train_len
+        print(self.train_len)
+        index = create_index(self.sessions)  # columns: sessionId, labelIndex
+
+        if sort_by_length:
+            # sort by labelIndex in descending order
+            ind = np.argsort(index[:, 1])[::-1]
+            index = index[ind]
+
+        self.index = index
+
+    def __getitem__(self, idx):
+        #print(idx)
+        sid, lidx = self.index[idx]
+        seq_all = list(reversed(self.sessions[sid][:lidx]))
+        target = self.sessions[sid][lidx]
+
+        seqs = [seq_all, seq_all]
+        gs = []
+
+        for idx, seq in enumerate(seqs):
+            items = list(np.unique(seq))
+            item2id = {n:i for i,n in enumerate(items)}
+
+            graph_data = {
+                ('item', 'interacts', 'item'):([],[]),
+                ('item', 'agg', 'target'):([],[]),
+                ('target', 'overlap', 'target'):([],[])
+            }
+            g = dgl.heterograph(graph_data)
+            
+            g = dgl.add_nodes(g, len(items), ntype='item')
+            g.nodes['item'].data['iid'] = torch.tensor(items)
+            g.nodes['item'].data['pid'] = torch.tensor(list(range(len(items))))
+            is_last = np.zeros(len(items))
+            is_last[item2id[seq[0]]] = 1
+            g.nodes['item'].data['last'] = torch.tensor(is_last)
+
+            seq_nid = [item2id[item] for item in seq]
+            g.add_edges(list(set(seq_nid)), list(set(seq_nid)), {'dis': torch.zeros(len(list(set(seq_nid))), dtype=torch.long)}, etype='interacts')
+            
+            for i in [1]:
+                src = seq_nid[:-i]
+                dst = seq_nid[i:]
+                edges = set(zip(src,dst))
+                if len(edges):
+                    src, dst = zip(*edges)
+                    g.add_edges(src, dst, {'dis':(2*i)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
+                    g.add_edges(dst, src, {'dis':(2*i-1)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')  
+                    
+            #agg
+            g = dgl.add_nodes(g, 1, ntype='target')
+            g.nodes['target'].data['tid'] = torch.tensor([0])
+            g.add_edges(seq_nid, [0]*len(seq_nid), {'pid':torch.tensor([i for i in range(len(seq_nid))] )}, etype='agg')
+
+            gs.append(g)
+
+        return gs[0], gs[1], target
+
+    def __len__(self):
+        return len(self.index)
