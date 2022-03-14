@@ -1147,3 +1147,128 @@ class Two_SessionGraph(nn.Module):
         kl_loss = torch.sum(score_mix * (torch.log(score_mix + epsilon) - torch.log(score_cat + epsilon)), dim=-1)
         regularization_loss  = torch.mean(torch.sum(kl_loss, dim=-1), dim=-1)
         return [loss1, loss2, loss_mix,  regularization_loss]
+
+
+class GATLayer(nn.Module):
+    def __init__(self, dim):
+        super(GATLayer, self).__init__()
+        self.dim = dim
+
+        self.pi =  nn.Linear(self.dim, 1, bias=False)
+        self.M = nn.Linear(2*self.dim, 1, bias=False)
+        self.dropout_local = nn.Dropout(config.dropout_local)
+
+    def forward(self, h_v, h_d, g):
+        with g.local_scope():
+            ###item to item
+            adj = g.edge_type_subgraph(['interacts'])
+            adj.nodes['item'].data['ft'] = h_v
+            adj.edges['interacts'].data['d'] = h_d
+            adj.apply_edges(dis_u_mul_v, etype='interacts')
+            e = self.pi(adj.edges['interacts'].data['e'])
+            mask = torch.sigmoid(self.M(adj.edges['interacts'].data['mask']))
+            e = e * mask
+
+            adj.edges['interacts'].data['a'] = self.dropout_local(edge_softmax(adj['interacts'], e))
+            adj.update_all(fn.u_mul_e('ft', 'a', 'm'), fn.sum('m', 'ft'), etype='interacts')
+            return adj.nodes['item'].data['ft']
+
+class GAT(nn.Module):
+    def __init__(self, dim):
+        super(GAT, self).__init__()
+        self.layer1 = GATLayer(dim)
+        self.layer2 = GATLayer(dim)
+
+    def forward(self, h_0, h_d, g):
+        h1 = self.layer1(h_0, h_d, g)
+        return h1
+        h1 = F.elu(h1+h_0)
+        h2 = self.layer2(h1, h_d, g)
+        h2 = F.elu(h2+h1)
+        return h2
+
+
+class PosAggregator(nn.Module):
+    def __init__(self, dim):
+        super(PosAggregator, self).__init__()
+        self.dim = dim
+
+        self.q = nn.Linear(2*self.dim, self.dim, bias=False)
+        self.r = nn.Linear(2*self.dim, self.dim, bias=False)
+
+
+    def forward(self, h_v, h_p, h_t, g):
+        with g.local_scope():
+            adj = g.edge_type_subgraph(['agg'])
+            adj.nodes['item'].data['ft'] = h_v
+            adj.nodes['target'].data['ft'] = h_t
+            adj.edges['agg'].data['pos'] = h_p
+            adj.apply_edges(fn.copy_src('ft','ft'))
+            e = self.q(torch.cat([adj.edata['ft'], adj.edata['pos']], dim=-1))
+            adj.edata['e'] = torch.tanh(e)
+
+            last_nodes = adj.filter_nodes(lambda nodes: nodes.data['last']==1, ntype='item')
+            last_feat = adj.nodes['item'].data['ft'][last_nodes]
+            last_feat = last_feat.unsqueeze(1).repeat(1,1,1).view(-1, config.dim)
+
+            f = self.r(torch.cat([adj.nodes['target'].data['ft'], last_feat], dim=-1))
+            adj.nodes['target'].data['ft'] = f
+            adj.update_all(udf_agg, fn.sum('m', 'ft'))
+
+            return g.nodes['target'].data['ft']
+
+class SessionGraph4(nn.Module):
+    def __init__(self, num_node):
+        super(SessionGraph4, self).__init__()
+        self.num_node = num_node
+        print(self.num_node)
+
+        self.embedding = nn.Embedding(self.num_node, config.dim)
+        self.pos_embedding = nn.Embedding(200, config.dim)
+        self.dis_embedding = nn.Embedding(200, config.dim)
+        self.target_embedding = nn.Embedding(10, config.dim)
+        self.feat_drop = nn.Dropout(config.feat_drop)
+        
+        self.gat = GAT(config.dim)
+        self.agg = PosAggregator(config.dim)
+
+        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
+        print('weight_decay:', config.weight_decay)
+        if config.weight_decay > 0:
+            params = fix_weight_decay(self)
+        else:
+            params = self.parameters()
+        self.optimizer = torch.optim.Adam(params, lr=config.lr, weight_decay=config.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(config.dim)
+        for weight in self.parameters():
+            weight.data.uniform_(-stdv, stdv)
+        
+    
+    def forward(self, g, epoch=None, pos_mask=None, neg_mask=None, training=False):
+        h_v = self.embedding(g.nodes['item'].data['iid'])
+        h_v = self.feat_drop(h_v)
+        h_v = F.normalize(h_v, dim=-1)
+        
+        h_d = self.dis_embedding(g.edges['interacts'].data['dis'])
+        h_p = self.pos_embedding(g.edges['agg'].data['pid'])
+        h_r = self.target_embedding(g.nodes['target'].data['tid'])
+
+        h = self.gat(h_v, h_d, g)
+        sr = self.agg(h, h_p, h_r, g)    
+
+        b = self.embedding.weight#[1:config.num_node]  # n_nodes x latent_size
+
+        sr = F.normalize(sr, dim=-1)
+        b = F.normalize(b, dim=-1)
+        
+        logits = torch.matmul(sr, b.transpose(1, 0))
+        score = torch.softmax(12 * logits, dim=1).log()
+        
+        return score
+
+    
