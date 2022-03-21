@@ -724,10 +724,17 @@ class DglAggregator2(nn.Module):
             return g.nodes['target'].data['ft']
 
 class SessionGraph2(nn.Module):
-    def __init__(self, num_node):
+    def __init__(self, num_node, feat_drop=config.feat_drop*3, lb_smooth = config.lb_smooth, cls_num_list=None, reweight_factor=0.002):
         super(SessionGraph2, self).__init__()
         self.num_node = num_node
         print(self.num_node)
+
+        # cls_num_list = np.array(cls_num_list) / np.sum(cls_num_list)
+        # C = len(cls_num_list)
+        # per_cls_weights = C * cls_num_list * reweight_factor + 1 - reweight_factor
+        # per_cls_weights = per_cls_weights / np.max(per_cls_weights)
+        # self.per_cls_weights = torch.tensor(per_cls_weights, dtype=torch.float, requires_grad=False).cuda()
+        # print(per_cls_weights)
 
         self.embedding = nn.Embedding(self.num_node, config.dim)
         self.pos_embedding = nn.Embedding(200, config.dim)
@@ -735,7 +742,7 @@ class SessionGraph2(nn.Module):
         self.dis_embedding = nn.Embedding(200, config.dim)
         self.target_embedding = nn.Embedding(10, config.dim)
         self.group_embedding = nn.Embedding(1, config.dim)
-        self.feat_drop = nn.Dropout(config.feat_drop*3)
+        self.feat_drop = nn.Dropout(feat_drop)
         
         # Parameters        
         # self.kmeans = Kmeans(1, config.dim, 10, 0.999, 1e-4)
@@ -754,7 +761,7 @@ class SessionGraph2(nn.Module):
             self.sc_sr.append(nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1)))
 
         # self.loss_function = nn.CrossEntropyLoss()
-        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
+        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=lb_smooth, reduction='mean')
         print('weight_decay:', config.weight_decay)
         if config.weight_decay > 0:
             params = fix_weight_decay(self)
@@ -778,6 +785,7 @@ class SessionGraph2(nn.Module):
     def forward(self, g, epoch=None, pos_mask=None, neg_mask=None, training=False):
         h_v = self.embedding(g.nodes['item'].data['iid'])
         h_v = self.feat_drop(h_v)
+        
         h_v = F.normalize(h_v, dim=-1)
         
         h_d = self.dis_embedding(g.edges['interacts'].data['dis'])
@@ -791,7 +799,7 @@ class SessionGraph2(nn.Module):
         b = F.normalize(b, dim=-1)
         
         logits = torch.matmul(sr, b.transpose(1, 0))
-        score = torch.softmax(12 * logits, dim=1)#.log()
+        score = torch.softmax(12 * logits , dim=1)#.log()
         
         return score
     
@@ -815,14 +823,15 @@ class SessionGraph2(nn.Module):
        
 
 class Ensamble(nn.Module):
-    def __init__(self, num_node):
+    def __init__(self, num_node, cls_num_list=None):
         super(Ensamble, self).__init__()
         # self.embedding = nn.Embedding(num_node, config.dim)
         # self.mix_weights = nn.Linear(2*config.dim, 2)
 
-        self.model1 = SessionGraph(num_node = num_node)
-        self.model2 = SessionGraph2(num_node = num_node)
-        self.phi = nn.Parameter(torch.Tensor(2))
+        self.model1 = SessionGraph2(feat_drop = config.feat_drop, lb_smooth = config.lb_smooth, num_node = num_node, cls_num_list=cls_num_list)
+        self.model2 = SessionGraph2(feat_drop = config.feat_drop*2, lb_smooth = config.lb_smooth, num_node = num_node, cls_num_list=cls_num_list)
+        self.model3 = SessionGraph2(feat_drop = config.feat_drop*3, lb_smooth = config.lb_smooth, num_node = num_node, cls_num_list=cls_num_list)
+        self.phi = nn.Parameter(torch.Tensor(3), requires_grad=False)
         self.loss = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
         self.optimizer = torch.optim.Adam(self.parameters(), lr=config.lr, weight_decay=config.weight_decay)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
@@ -830,6 +839,7 @@ class Ensamble(nn.Module):
         self.reset_parameters()
         self.phi.data[0] = 0
         self.phi.data[1] = 0
+        self.phi.data[2] = 0
 
     def reset_parameters(self):
         stdv = 1.0 / math.sqrt(config.dim)
@@ -856,23 +866,26 @@ class Ensamble(nn.Module):
 
         scores1 = self.model1(g, epoch, pos_mask, neg_mask, training)
         scores2 = self.model2(g, epoch, pos_mask, neg_mask, training)
+        scores3 = self.model3(g, epoch, pos_mask, neg_mask, training)
 
-        phi = torch.softmax(self.phi, dim=-1)
-        # print(phi)
-        phi = phi.unsqueeze(0).unsqueeze(-1).repeat(scores1.size(0),1,1)
-        score_mix = torch.sum(torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1)], dim=1) * phi, dim=1)
+        with torch.no_grad():
+            phi = torch.softmax(self.phi, dim=-1)
+            # print(phi)
+            phi = phi.unsqueeze(0).unsqueeze(-1).repeat(scores1.size(0),1,1)
+            score_mix = torch.sum(torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1), scores3.unsqueeze(1)], dim=1) * phi, dim=1)
 
-        return [scores1, scores2, score_mix]
+        return [scores1, scores2, scores3, score_mix]
 
     def loss_function(self, scores, targets):
-        scores1, scores2, score_mix = scores
-        score_cat = torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1)], dim=1)
+        scores1, scores2, scores3, score_mix = scores
+        score_cat = torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1), scores3.unsqueeze(1)], dim=1)
         loss1 = self.model1.loss_function(scores1.log(), targets)
         loss2 = self.model2.loss_function(scores2.log(), targets)
+        loss3 = self.model3.loss_function(scores3.log(), targets)
         loss_mix = self.loss(score_mix.log(), targets)
 
         epsilon = 1e-8
         score_mix = torch.unsqueeze(score_mix, 1)
         kl_loss = torch.sum(score_mix * (torch.log(score_mix + epsilon) - torch.log(score_cat + epsilon)), dim=-1)
         regularization_loss  = torch.mean(torch.sum(kl_loss, dim=-1), dim=-1)
-        return [loss1, loss2, loss_mix,  regularization_loss]
+        return [loss1, loss2, loss3, loss_mix,  regularization_loss]

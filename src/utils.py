@@ -243,6 +243,7 @@ class AugmentedDataset:
                 src, dst = zip(*edges)
                 g.add_edges(src, dst, {'dis':(2*i)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
                 g.add_edges(dst, src, {'dis':(2*i-1)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
+
             # EDGES = EDGES - set(zip(src,dst)) - set(zip(dst,src)) - set(zip(seq_nid,seq_nid))
         
         # # print(seq, edges, self.G.subgraph(items).edges())

@@ -65,8 +65,9 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
             assert not torch.isnan(scores[-1]).any() #mix
 
             # loss = F.nll_loss(scores, targets)
-            loss1, loss2, loss_mix, regularization_loss = model.loss_function(scores, targets)
-            loss = loss1 + loss2 + loss_mix +  regularization_loss
+            loss1, loss2, loss3, loss_mix, regularization_loss = model.loss_function(scores, targets)
+            loss = loss1 + loss2 + loss3 #- regularization_loss
+
             t.set_postfix(
                         loss = loss.item(),
                         loss_mix = loss_mix.item(),
@@ -155,6 +156,12 @@ G = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', '
 train_data = AugmentedDataset(train_sessions, G, training=True)
 test_data = AugmentedDataset(test_sessions, G, training=False)
 
+cls_num_list = [0]*num_items
+for sess in train_sessions:
+    for i in sess:
+        cls_num_list[i] += 1
+
+
 if __name__ == "__main__":
     print(config.dataset, config.num_node, "lr:",config.lr, "lr_dc:",config.lr_dc, "lr_dc_step:",config.lr_dc_step, "dropout_local:",config.dropout_local)
     init_seed(42)
@@ -167,7 +174,7 @@ if __name__ == "__main__":
     # train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
     # test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
 
-    model = trans_to_cuda(Ensamble(num_node = config.num_node))
+    model = trans_to_cuda(Ensamble(num_node = config.num_node, cls_num_list=cls_num_list))
 
     start = time.time()
     best_result = [0, 0, 0, 0, 0, 0]
