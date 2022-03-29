@@ -1,3 +1,4 @@
+from collections import defaultdict
 from turtle import pos
 from numpy.lib.twodim_base import mask_indices
 import config
@@ -8,7 +9,7 @@ import numpy as np
 import random
 import pickle
 from tqdm import tqdm
-from model import SessionGraph,Transformer, Ensamble, SessionGraph3, Two_SessionGraph, SessionGraph4
+from model import SessionGraph,Transformer, Ensamble, SessionGraph3, Two_SessionGraph, SessionGraph4, Ensamble_Combine
 from utils import Data
 import torch.nn.functional as F
 import networkx as nx
@@ -38,11 +39,17 @@ def trans_to_cpu(variable):
     else:
         return variable
 
+def collate_fn_train(samples):
+    g0, g1, target0, target1 = zip(*samples)
+    g0 = dgl.batch(g0)
+    g1 = dgl.batch(g1)
+    return g0, g1, torch.tensor(target0), torch.tensor(target1)
 
-def collate_fn(samples):
+def collate_fn_test(samples):
     g, target = zip(*samples)
     g = dgl.batch(g)
     return g, torch.tensor(target)
+
 
 def train_test(model, train_data, test_data, epoch, train_sessions):
     print('start training: ', datetime.datetime.now())
@@ -50,21 +57,30 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
 
     total_loss = 0.0
     train_loader = torch.utils.data.DataLoader(train_data, num_workers=20, batch_size=config.batch_size,
-                                               shuffle=False, pin_memory=True, collate_fn=collate_fn)
+                                               shuffle=False, pin_memory=True, collate_fn=collate_fn_train)
     
     with tqdm(train_loader) as t:
         for data in t:
             model.optimizer.zero_grad()
-            g, target = data
-            g = g.to(torch.device('cuda'))
-            targets = trans_to_cuda(target).long()
-            neg_mask = (targets.unsqueeze(0) != targets.unsqueeze(1)).float()
-            pos_mask = (targets.unsqueeze(0) == targets.unsqueeze(1)).float() -torch.eye(targets.shape[0]).cuda()
-            scores =  model(g, epoch, pos_mask, neg_mask, training=True)
-            assert not torch.isnan(scores[-1]).any() #mix
+            g0, g1, target0, target1 = data
+            g0 = g0.to(torch.device('cuda'))
+            g1 = g1.to(torch.device('cuda'))
+            targets0 = trans_to_cuda(target0).long()
+            targets1 = trans_to_cuda(target1).long()
+            # loss1, loss2, regularization_loss = model(g0, g1, targets0, targets1, training=True)
+            # loss = loss1 + loss2 # + regularization_loss
+            sr0 = model(g0, epoch, training=True)
+            sr1 = model(g1, epoch, training=True)
+            assert not torch.isnan(sr0[-1]).any() #mix
+
+            l = 0.85
+            mixed_sr = l * sr0 + (1-l) * sr1
+            score = model.get_score(mixed_sr)
+            loss = l * model.loss_function(score, targets0) + (1 - l) *  model.loss_function(score, targets1)
+
 
             # loss = F.nll_loss(scores, targets)
-            loss = model.loss_function(scores, targets)
+            # loss = model.loss_function(scores, targets)
             # loss1, loss2, loss_mix, regularization_loss = model.loss_function(scores, targets)
             # loss = loss1 + loss2 + loss_mix +  regularization_loss
             t.set_postfix(
@@ -82,7 +98,7 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     print('start predicting: ', datetime.datetime.now())
     model.eval()
     test_loader = torch.utils.data.DataLoader(test_data, num_workers=20, batch_size=config.batch_size,
-                                              shuffle=True, pin_memory=True, collate_fn=collate_fn)
+                                              shuffle=True, pin_memory=True, collate_fn=collate_fn_test)
     result = []
     hit20, mrr20 = [], []
     hit10, mrr10 = [], []
@@ -132,6 +148,54 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     result.append(np.mean(mrr10) * 100)
     result.append(np.mean(mrr20) * 100)       
 
+
+    hit20s, mrr20s = defaultdict(list), defaultdict(list)
+    hit10s, mrr10s = defaultdict(list), defaultdict(list)
+    hit5s, mrr5s = defaultdict(list), defaultdict(list)
+    for data in test_loader:
+        model.optimizer.zero_grad()
+        g, target = data
+        g = g.to(torch.device('cuda'))
+        targets = trans_to_cuda(target).long()
+        scores =  model(g,g, epoch)
+
+        # scores = scores[-1] ###mix score
+        assert not torch.isnan(scores).any()
+
+        sub_scores = scores.topk(20)[1]
+        sub_scores = trans_to_cpu(sub_scores).detach().numpy()
+        targets = target.numpy()
+        for score, target in zip(sub_scores, targets):
+            hit20s[target].append(np.isin(target, score))
+            if len(np.where(score == target)[0]) == 0:
+                mrr20s[target].append(0)
+            else:
+                mrr20s[target].append(1 / (np.where(score == target)[0][0] + 1))
+
+        sub_scores = scores.topk(10)[1]
+        sub_scores = trans_to_cpu(sub_scores).detach().numpy()
+        for score, target in zip(sub_scores, targets):
+            hit10s[target].append(np.isin(target, score))
+            if len(np.where(score == target)[0]) == 0:
+                mrr10s[target].append(0)
+            else:
+                mrr10s[target].append(1 / (np.where(score == target)[0][0] + 1))
+        
+        sub_scores = scores.topk(5)[1]
+        sub_scores = trans_to_cpu(sub_scores).detach().numpy()
+        for score, target in zip(sub_scores, targets):
+            hit5s[target].append(np.isin(target, score))
+            if len(np.where(score == target)[0]) == 0:
+                mrr5s[target].append(0)
+            else:
+                mrr5s[target].append(1 / (np.where(score == target)[0][0] + 1))
+
+    result.append(np.mean([np.mean(v) for v in hit5s.values()]) * 100)
+    result.append(np.mean([np.mean(v) for v in hit10s.values()]) * 100)
+    result.append(np.mean([np.mean(v) for v in hit20s.values()]) * 100)
+    result.append(np.mean([np.mean(v) for v in mrr5s.values()]) * 100)
+    result.append(np.mean([np.mean(v) for v in mrr10s.values()]) * 100)
+    result.append(np.mean([np.mean(v) for v in mrr20s.values()]) * 100)
     return result
 
 import pandas as pd
@@ -148,11 +212,11 @@ def read_dataset(dataset_dir):
     return train_sessions, test_sessions, num_items
 
 from pathlib import Path
-from utils import AugmentedDataset
+from utils import AugmentedDataset,Mix_AugmentedDataset
 train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/diginetica"))
 config.num_node = num_items
 G = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', 'rb'))
-train_data = AugmentedDataset(train_sessions, G, training=True, train_len=len(train_sessions))
+train_data = Mix_AugmentedDataset(train_sessions, G, training=True, train_len=len(train_sessions))
 test_data = AugmentedDataset(test_sessions, G, training=False, train_len=len(train_sessions))
 
 
@@ -182,7 +246,7 @@ if __name__ == "__main__":
     for epoch in range(config.epoch):
         print('-------------------------------------------------------')
         print('epoch: ', epoch)
-        hit5, hit10, hit20, mrr5, mrr10, mrr20 = train_test(model, train_data, test_data, epoch, train_sessions)
+        hit5, hit10, hit20, mrr5, mrr10, mrr20, hit5s, hit10s, hit20s, mrr5s, mrr10s, mrr20s = train_test(model, train_data, test_data, epoch, train_sessions)
         if hit5 >= best_result[0]:
             best_result[0] = hit5
             best_epoch[0] = epoch
@@ -202,6 +266,7 @@ if __name__ == "__main__":
             best_result[5] = mrr20
             best_epoch[5] = epoch
         print('Current Result:')
+        print('\tRecall5s:\t%.4f\tRecall10s:\t%.4f\tRecall@20s:\t%.4f\tMMR@5s:\t%.4f\tMMR@10s:\t%.4f\tMMR@20s:\t%.4f' % (hit5s, hit10s, hit20s, mrr5s, mrr10s, mrr20s))
         print('\tRecall5:\t%.4f\tRecall10:\t%.4f\tRecall@20:\t%.4f\tMMR@5:\t%.4f\tMMR@10:\t%.4f\tMMR@20:\t%.4f' % (hit5, hit10, hit20, mrr5, mrr10, mrr20))
         print('Best Result:')
         print('\tRecall5:\t%.4f\tRecall10:\t%.4f\tRecall@20:\t%.4f\tMMR@5:\t%.4f\tMMR@10:\t%.4f\tMMR@20:\t%.4f\tEpoch:\t%d,\t%d,\t%d,\t%d,\t%d,\t%d' % (

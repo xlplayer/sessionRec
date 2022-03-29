@@ -1218,7 +1218,7 @@ class PosAggregator(nn.Module):
             return g.nodes['target'].data['ft']
 
 class SessionGraph4(nn.Module):
-    def __init__(self, num_node):
+    def __init__(self, num_node, feat_drop=config.feat_drop):
         super(SessionGraph4, self).__init__()
         self.num_node = num_node
         print(self.num_node)
@@ -1227,7 +1227,7 @@ class SessionGraph4(nn.Module):
         self.pos_embedding = nn.Embedding(200, config.dim)
         self.dis_embedding = nn.Embedding(200, config.dim)
         self.target_embedding = nn.Embedding(10, config.dim)
-        self.feat_drop = nn.Dropout(config.feat_drop)
+        self.feat_drop = nn.Dropout(feat_drop)
         
         self.gat = GAT(config.dim)
         self.agg = PosAggregator(config.dim)
@@ -1264,6 +1264,9 @@ class SessionGraph4(nn.Module):
         b = self.embedding.weight#[1:config.num_node]  # n_nodes x latent_size
 
         sr = F.normalize(sr, dim=-1)
+        if training:
+            return sr
+
         b = F.normalize(b, dim=-1)
         
         logits = torch.matmul(sr, b.transpose(1, 0))
@@ -1271,4 +1274,63 @@ class SessionGraph4(nn.Module):
         
         return score
 
+    def get_score(self, sr):
+        b = self.embedding.weight#[1:config.num_node]  # n_nodes x latent_size
+        b = F.normalize(b, dim=-1)
+        
+        logits = torch.matmul(sr, b.transpose(1, 0))
+        # score = torch.softmax(12 * logits, dim=1)#.log()
+        score = torch.softmax(12 * logits, dim=1).log()
+        return score
     
+
+class Ensamble_Combine(nn.Module):
+    def __init__(self, num_node):
+        super(Ensamble_Combine, self).__init__()
+
+        self.model1 = SessionGraph4(num_node = num_node, feat_drop=config.feat_drop)
+        self.model2 = SessionGraph4(num_node = num_node, feat_drop=config.feat_drop)
+        self.phi = nn.Parameter(torch.Tensor(2), requires_grad=False)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
+
+        self.reset_parameters()
+        self.phi.data[0] = 0
+        self.phi.data[1] = 0
+
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(config.dim)
+        for weight in self.parameters():
+            weight.data.uniform_(-stdv, stdv)
+    
+    def forward(self, g1, g2, targets1=None, targets2=None, epoch=None, pos_mask=None, neg_mask=None, training=False):
+        l = 0.9
+        scores1_sr0 = self.model1(g1, epoch, training=True)
+        # scores1_sr1 = self.model1(g2, epoch, training=True)
+        # scores1_mixed_sr = l * scores1_sr0 + (1-l) * scores1_sr1
+        scores1 = self.model1.get_score(scores1_sr0)
+
+        scores2_sr0 = self.model2(g1, epoch, training=True)
+        # scores2_sr1 = self.model2(g2, epoch, training=True)
+        # scores2_mixed_sr = l * scores2_sr0 + (1-l) * scores2_sr1
+        scores2 = self.model2.get_score(scores2_sr0)
+
+        phi = torch.softmax(self.phi, dim=-1)
+        # print(phi)
+        phi = phi.unsqueeze(0).unsqueeze(-1).repeat(scores1.size(0),1,1)
+        score_mix = torch.sum(torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1)], dim=1) * phi, dim=1)
+
+        if not training:
+            return score_mix
+
+        score_cat = torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1)], dim=1)
+        loss1 = self.model1.loss_function(scores1.log(), targets1) #+ (1 - l) *  self.model1.loss_function(scores1.log(), targets2)
+        loss2 = self.model2.loss_function(scores2.log(), targets1) #+ (1 - l) *  self.model2.loss_function(scores2.log(), targets2)
+
+        epsilon = 1e-8
+        score_mix = torch.unsqueeze(score_mix, 1)
+        with torch.no_grad():
+            kl_loss = torch.sum(score_mix * (torch.log(score_mix + epsilon) - torch.log(score_cat + epsilon)), dim=-1)
+        regularization_loss  = torch.mean(torch.sum(kl_loss, dim=-1), dim=-1)
+
+        return loss1, loss2, regularization_loss
