@@ -1,4 +1,4 @@
-dataset = 'diginetica'
+dataset = 'Tmall'
 num_node = 43098
 dim =256
 epoch = 10
@@ -17,11 +17,20 @@ weight_decay = 0
 order = 1
 lb_smooth = 0.4
 
+l = 0.85
+window_size = 2
+
 # graph_path = "./data/"+dataset+"_edges.csv"
 
 if dataset == "diginetica":
     num_node = 43098
     dropout_local=0.0
+
+elif dataset == "gowalla":
+    feat_drop = 0.5
+
+elif dataset == "lastfm":
+    lr_dc_step = 3
 
 elif dataset == "Nowplaying":
     num_node = 60417
@@ -29,7 +38,11 @@ elif dataset == "Nowplaying":
 
 elif dataset == "Tmall":
     num_node = 40728
-    dropout_local = 0.5
+    lb_smooth = 0
+    feat_drop = 0.15
+    window_size = 4
+    # weight_decay = 5e-5
+    # dropout_local = 0.5
 
 
 

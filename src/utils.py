@@ -96,7 +96,7 @@ from tqdm import tqdm
 #         return self.length
 
 class Data(Dataset):
-    def __init__(self, data, edge2idx, edge2fre, adj, is_train=True):
+    def __init__(self, data, edge2idx=None, edge2fre=None, adj=None, is_train=True):
         self.edge2idx = edge2idx
         self.edge2fre = edge2fre
         self.adj = adj
@@ -163,13 +163,12 @@ def create_index(sessions):
 
 
 class AugmentedDataset:
-    def __init__(self, sessions, G, sort_by_length=False, NCE=False, training=False, epoch=None, train_len=None):
+    def __init__(self, sessions, sort_by_length=False, NCE=False, training=False, epoch=None, train_len=None):
         # if training and epoch is not None and epoch == 0:
         #     print("hhh")            
         #     sessions = np.array([list(reversed(s)) for s in sessions[-150000:]])
         self.training = training
         self.sessions = sessions
-        self.G = G
         self.train_len = train_len
         print(self.train_len)
         # self.graphs = graphs
@@ -243,7 +242,7 @@ class AugmentedDataset:
         #     threshold = self.train_len
 
         # EDGES = set([(item2id[e[0]], item2id[e[1]]) for e in self.G.subgraph(items).edges(data='time')])# if e[2]<threshold]) 
-        for i in [1]:
+        for i in range(1,config.window_size):
             src = seq_nid[:-i]
             dst = seq_nid[i:]
 
@@ -376,7 +375,7 @@ class Two_AugmentedDataset:
             seq_nid = [item2id[item] for item in seq]
             g.add_edges(list(set(seq_nid)), list(set(seq_nid)), {'dis': torch.zeros(len(list(set(seq_nid))), dtype=torch.long)}, etype='interacts')
             
-            for i in [1]:
+            for i in range(1,config.window_size):
                 src = seq_nid[:-i]
                 dst = seq_nid[i:]
                 edges = set(zip(src,dst))
@@ -400,10 +399,9 @@ class Two_AugmentedDataset:
 
 
 class Mix_AugmentedDataset:
-    def __init__(self, sessions, G, sort_by_length=False, NCE=False, training=False, epoch=None, train_len=None):
+    def __init__(self, sessions, sort_by_length=False, NCE=False, training=False, epoch=None, train_len=None):
         self.training = training
         self.sessions = sessions
-        self.G = G
         self.train_len = train_len
         print(self.train_len)
         index = create_index(self.sessions)  # columns: sessionId, labelIndex
@@ -428,7 +426,8 @@ class Mix_AugmentedDataset:
         weights = []
         for idx in range(self.__len__()):
             sid, lidx = self.index[idx]
-            fre = np.mean([self.class_weight[self.cls2idx[item]] for item in self.sessions[sid][:lidx+1]])
+            # fre = np.mean([self.class_weight[self.cls2idx[item]] for item in self.sessions[sid][:lidx+1]])
+            fre = self.class_weight[self.cls2idx[self.sessions[sid][lidx]]]
             weights.append(fre)
         self.cum_weights = list(accumulate(weights))
         
@@ -475,7 +474,7 @@ class Mix_AugmentedDataset:
         elif TYPE == "uniform":
             sample_index = random.randint(0, self.__len__() - 1)
         elif TYPE == "mean":
-            sample_index = random.choices(self, range(self.__len__), cum_weights=self.cum_weights, k=1)[0]
+            sample_index = random.choices(range(self.__len__()), cum_weights=self.cum_weights, k=1)[0]
 
 
         sid1, lidx1 = self.index[sample_index]
@@ -506,7 +505,7 @@ class Mix_AugmentedDataset:
             seq_nid = [item2id[item] for item in seq]
             g.add_edges(list(set(seq_nid)), list(set(seq_nid)), {'dis': torch.zeros(len(list(set(seq_nid))), dtype=torch.long)}, etype='interacts')
             
-            for i in [1]:
+            for i in range(1,config.window_size):
                 src = seq_nid[:-i]
                 dst = seq_nid[i:]
                 edges = set(zip(src,dst))

@@ -1228,7 +1228,9 @@ class SessionGraph4(nn.Module):
         self.dis_embedding = nn.Embedding(200, config.dim)
         self.target_embedding = nn.Embedding(10, config.dim)
         self.feat_drop = nn.Dropout(feat_drop)
-        
+        # self.phi = nn.Parameter(torch.Tensor(2))
+        self.sc_sr = nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1))
+
         self.gat = GAT(config.dim)
         self.agg = PosAggregator(config.dim)
 
@@ -1270,18 +1272,54 @@ class SessionGraph4(nn.Module):
         b = F.normalize(b, dim=-1)
         
         logits = torch.matmul(sr, b.transpose(1, 0))
-        score = torch.softmax(12 * logits, dim=1).log()
-        
-        return score
+        # score = torch.softmax(12 * logits, dim=1).log()
+        # return score
 
-    def get_score(self, sr):
+        # phi = torch.softmax(self.phi, dim=-1)
+        # phi = phi.unsqueeze(0).unsqueeze(-1).repeat(sr.size(0),1,1)
+        phi = self.sc_sr(sr).unsqueeze(-1)
+        mask = torch.zeros(phi.size(0), config.num_node).cuda()
+        iids = torch.split(g.nodes['item'].data['iid'], g.batch_num_nodes('item').tolist())
+        for i in range(len(mask)):
+            mask[i, iids[i]] = 1
+        # print(iids)
+        logits_in = logits.masked_fill(~mask.bool(), float('-inf'))
+        logits_ex = logits.masked_fill(mask.bool(), float('-inf'))
+        score     = torch.softmax(12 * logits_in, dim=-1)
+        score_ex  = torch.softmax(12 * logits_ex, dim=-1) 
+        assert not torch.isnan(score).any()
+        assert not torch.isnan(score_ex).any()
+
+        phi = phi.squeeze(1)
+        score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
+        return torch.log(score)
+
+    def get_score(self, sr, g=None):
         b = self.embedding.weight#[1:config.num_node]  # n_nodes x latent_size
         b = F.normalize(b, dim=-1)
         
         logits = torch.matmul(sr, b.transpose(1, 0))
-        # score = torch.softmax(12 * logits, dim=1)#.log()
-        score = torch.softmax(12 * logits, dim=1).log()
-        return score
+        # score = torch.softmax(12 * logits, dim=1).log()
+        # return score
+
+        # phi = torch.softmax(self.phi, dim=-1)
+        # phi = phi.unsqueeze(0).unsqueeze(-1).repeat(sr.size(0),1,1)
+        phi = self.sc_sr(sr).unsqueeze(-1)
+        mask = torch.zeros(phi.size(0), config.num_node).cuda()
+        iids = torch.split(g.nodes['item'].data['iid'], g.batch_num_nodes('item').tolist())
+        for i in range(len(mask)):
+            mask[i, iids[i]] = 1
+        # print(iids)
+        logits_in = logits.masked_fill(~mask.bool(), float('-inf'))
+        logits_ex = logits.masked_fill(mask.bool(), float('-inf'))
+        score     = torch.softmax(12 * logits_in, dim=-1)
+        score_ex  = torch.softmax(12 * logits_ex, dim=-1) 
+        assert not torch.isnan(score).any()
+        assert not torch.isnan(score_ex).any()
+
+        phi = phi.squeeze(1)
+        score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
+        return torch.log(score)
     
 
 class Ensamble_Combine(nn.Module):

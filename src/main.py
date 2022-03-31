@@ -64,19 +64,22 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
             model.optimizer.zero_grad()
             g0, g1, target0, target1 = data
             g0 = g0.to(torch.device('cuda'))
-            g1 = g1.to(torch.device('cuda'))
+            # g1 = g1.to(torch.device('cuda'))
             targets0 = trans_to_cuda(target0).long()
-            targets1 = trans_to_cuda(target1).long()
+            # targets1 = trans_to_cuda(target1).long()
             # loss1, loss2, regularization_loss = model(g0, g1, targets0, targets1, training=True)
             # loss = loss1 + loss2 # + regularization_loss
             sr0 = model(g0, epoch, training=True)
-            sr1 = model(g1, epoch, training=True)
+            # sr1 = model(g1, epoch, training=True)
             assert not torch.isnan(sr0[-1]).any() #mix
 
-            l = 0.85
-            mixed_sr = l * sr0 + (1-l) * sr1
-            score = model.get_score(mixed_sr)
-            loss = l * model.loss_function(score, targets0) + (1 - l) *  model.loss_function(score, targets1)
+            # l = config.l
+            # mixed_sr = l * sr0 + (1-l) * sr1
+            # score = model.get_score(mixed_sr)
+            # loss = l * model.loss_function(score, targets0) + (1 - l) *  model.loss_function(score, targets1)
+
+            score = model.get_score(sr0, g0)
+            loss = model.loss_function(score, targets0)
 
 
             # loss = F.nll_loss(scores, targets)
@@ -213,11 +216,17 @@ def read_dataset(dataset_dir):
 
 from pathlib import Path
 from utils import AugmentedDataset,Mix_AugmentedDataset
-train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/diginetica"))
-config.num_node = num_items
-G = pickle.load(open('/home/xl/lxl/model/DGL/data/'+config.dataset+'_adj.pkl', 'rb'))
-train_data = Mix_AugmentedDataset(train_sessions, G, training=True, train_len=len(train_sessions))
-test_data = AugmentedDataset(test_sessions, G, training=False, train_len=len(train_sessions))
+
+if config.dataset in ['diginetica','gowalla','lastfm']:
+    train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/"+config.dataset))
+    config.num_node = num_items
+    train_data = Mix_AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions))
+    test_data = AugmentedDataset(test_sessions, training=False, train_len=len(train_sessions))
+else:
+    train_sessions = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/all_train_seq.txt', 'rb'))
+    train_data = Mix_AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions))
+    test_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/test.txt', 'rb'))
+    test_data = Data(test_data, is_train=False)
 
 
 if __name__ == "__main__":
