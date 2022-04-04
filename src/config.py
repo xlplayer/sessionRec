@@ -1,4 +1,4 @@
-dataset = 'Tmall'
+dataset = 'yoochoose1_64'
 num_node = 43098
 dim =256
 epoch = 10
@@ -27,10 +27,10 @@ if dataset == "diginetica":
     dropout_local=0.0
 
 elif dataset == "gowalla":
-    feat_drop = 0.5
+    lb_smooth = 0.8
 
 elif dataset == "lastfm":
-    lr_dc_step = 3
+    lb_smooth = 0.8
 
 elif dataset == "Nowplaying":
     num_node = 60417
@@ -38,13 +38,11 @@ elif dataset == "Nowplaying":
 
 elif dataset == "Tmall":
     num_node = 40728
-    lb_smooth = 0
-    feat_drop = 0.15
-    window_size = 4
-    # weight_decay = 5e-5
-    # dropout_local = 0.5
+    lb_smooth = 0.2
 
+elif dataset == "yoochoose1_4":
+    num_node = 37484
 
-
-
-
+elif dataset == "yoochoose1_64":
+    num_node = 37484
+    lb_smooth = 0.6

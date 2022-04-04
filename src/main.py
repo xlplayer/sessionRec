@@ -9,7 +9,7 @@ import numpy as np
 import random
 import pickle
 from tqdm import tqdm
-from model import SessionGraph,Transformer, Ensamble, SessionGraph3, Two_SessionGraph, SessionGraph4, Ensamble_Combine
+from model import Ensamble, SessionGraph4
 from utils import Data
 import torch.nn.functional as F
 import networkx as nx
@@ -61,6 +61,7 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     
     with tqdm(train_loader) as t:
         for data in t:
+            torch.cuda.empty_cache()
             model.optimizer.zero_grad()
             g0, g1, target0, target1 = data
             g0 = g0.to(torch.device('cuda'))
@@ -69,18 +70,18 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
             # targets1 = trans_to_cuda(target1).long()
             # loss1, loss2, regularization_loss = model(g0, g1, targets0, targets1, training=True)
             # loss = loss1 + loss2 # + regularization_loss
-            sr0 = model(g0, epoch, training=True)
+            # sr0 = model(g0, epoch, training=True)
             # sr1 = model(g1, epoch, training=True)
-            assert not torch.isnan(sr0[-1]).any() #mix
+            # assert not torch.isnan(sr0[-1]).any() #mix
 
             # l = config.l
             # mixed_sr = l * sr0 + (1-l) * sr1
             # score = model.get_score(mixed_sr)
             # loss = l * model.loss_function(score, targets0) + (1 - l) *  model.loss_function(score, targets1)
 
-            score = model.get_score(sr0, g0)
-            loss = model.loss_function(score, targets0)
-
+            # score = model.get_score(sr0, g0)
+            # loss = model.loss_function(score, targets0)
+            loss = model(g0, targets0, training=True)
 
             # loss = F.nll_loss(scores, targets)
             # loss = model.loss_function(scores, targets)
@@ -100,106 +101,108 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
 
     print('start predicting: ', datetime.datetime.now())
     model.eval()
-    test_loader = torch.utils.data.DataLoader(test_data, num_workers=20, batch_size=config.batch_size,
-                                              shuffle=True, pin_memory=True, collate_fn=collate_fn_test)
-    result = []
-    hit20, mrr20 = [], []
-    hit10, mrr10 = [], []
-    hit5, mrr5 = [], []
-    for data in test_loader:
-        model.optimizer.zero_grad()
-        g, target = data
-        g = g.to(torch.device('cuda'))
-        targets = trans_to_cuda(target).long()
-        scores =  model(g, epoch)
+    torch.cuda.empty_cache()
+    with torch.no_grad():
+        test_loader = torch.utils.data.DataLoader(test_data, num_workers=20, batch_size=config.batch_size,
+                                                shuffle=True, pin_memory=True, collate_fn=collate_fn_test)
+        result = []
+        hit20, mrr20 = [], []
+        hit10, mrr10 = [], []
+        hit5, mrr5 = [], []
+        for data in test_loader:
+            model.optimizer.zero_grad()
+            g, target = data
+            g = g.to(torch.device('cuda'))
+            targets = trans_to_cuda(target).long()
+            scores =  model(g, epoch)
 
-        # scores = scores[-1] ###mix score
-        assert not torch.isnan(scores).any()
+            # scores = scores[-1] ###mix score
+            assert not torch.isnan(scores).any()
 
-        sub_scores = scores.topk(20)[1]
-        sub_scores = trans_to_cpu(sub_scores).detach().numpy()
-        targets = target.numpy()
-        for score, target in zip(sub_scores, targets):
-            hit20.append(np.isin(target, score))
-            if len(np.where(score == target)[0]) == 0:
-                mrr20.append(0)
-            else:
-                mrr20.append(1 / (np.where(score == target)[0][0] + 1))
+            sub_scores = scores.topk(20)[1]
+            sub_scores = trans_to_cpu(sub_scores).detach().numpy()
+            targets = target.numpy()
+            for score, target in zip(sub_scores, targets):
+                hit20.append(np.isin(target, score))
+                if len(np.where(score == target)[0]) == 0:
+                    mrr20.append(0)
+                else:
+                    mrr20.append(1 / (np.where(score == target)[0][0] + 1))
 
-        sub_scores = scores.topk(10)[1]
-        sub_scores = trans_to_cpu(sub_scores).detach().numpy()
-        for score, target in zip(sub_scores, targets):
-            hit10.append(np.isin(target, score))
-            if len(np.where(score == target)[0]) == 0:
-                mrr10.append(0)
-            else:
-                mrr10.append(1 / (np.where(score == target)[0][0] + 1))
-        
-        sub_scores = scores.topk(5)[1]
-        sub_scores = trans_to_cpu(sub_scores).detach().numpy()
-        for score, target in zip(sub_scores, targets):
-            hit5.append(np.isin(target, score))
-            if len(np.where(score == target)[0]) == 0:
-                mrr5.append(0)
-            else:
-                mrr5.append(1 / (np.where(score == target)[0][0] + 1))
+            sub_scores = scores.topk(10)[1]
+            sub_scores = trans_to_cpu(sub_scores).detach().numpy()
+            for score, target in zip(sub_scores, targets):
+                hit10.append(np.isin(target, score))
+                if len(np.where(score == target)[0]) == 0:
+                    mrr10.append(0)
+                else:
+                    mrr10.append(1 / (np.where(score == target)[0][0] + 1))
+            
+            sub_scores = scores.topk(5)[1]
+            sub_scores = trans_to_cpu(sub_scores).detach().numpy()
+            for score, target in zip(sub_scores, targets):
+                hit5.append(np.isin(target, score))
+                if len(np.where(score == target)[0]) == 0:
+                    mrr5.append(0)
+                else:
+                    mrr5.append(1 / (np.where(score == target)[0][0] + 1))
 
-    result.append(np.mean(hit5) * 100)
-    result.append(np.mean(hit10) * 100)
-    result.append(np.mean(hit20) * 100)
-    result.append(np.mean(mrr5) * 100)
-    result.append(np.mean(mrr10) * 100)
-    result.append(np.mean(mrr20) * 100)       
+        result.append(np.mean(hit5) * 100)
+        result.append(np.mean(hit10) * 100)
+        result.append(np.mean(hit20) * 100)
+        result.append(np.mean(mrr5) * 100)
+        result.append(np.mean(mrr10) * 100)
+        result.append(np.mean(mrr20) * 100)       
 
 
-    hit20s, mrr20s = defaultdict(list), defaultdict(list)
-    hit10s, mrr10s = defaultdict(list), defaultdict(list)
-    hit5s, mrr5s = defaultdict(list), defaultdict(list)
-    for data in test_loader:
-        model.optimizer.zero_grad()
-        g, target = data
-        g = g.to(torch.device('cuda'))
-        targets = trans_to_cuda(target).long()
-        scores =  model(g,g, epoch)
+        hit20s, mrr20s = defaultdict(list), defaultdict(list)
+        hit10s, mrr10s = defaultdict(list), defaultdict(list)
+        hit5s, mrr5s = defaultdict(list), defaultdict(list)
+        for data in test_loader:
+            model.optimizer.zero_grad()
+            g, target = data
+            g = g.to(torch.device('cuda'))
+            targets = trans_to_cuda(target).long()
+            scores =  model(g,g, epoch)
 
-        # scores = scores[-1] ###mix score
-        assert not torch.isnan(scores).any()
+            # scores = scores[-1] ###mix score
+            assert not torch.isnan(scores).any()
 
-        sub_scores = scores.topk(20)[1]
-        sub_scores = trans_to_cpu(sub_scores).detach().numpy()
-        targets = target.numpy()
-        for score, target in zip(sub_scores, targets):
-            hit20s[target].append(np.isin(target, score))
-            if len(np.where(score == target)[0]) == 0:
-                mrr20s[target].append(0)
-            else:
-                mrr20s[target].append(1 / (np.where(score == target)[0][0] + 1))
+            sub_scores = scores.topk(20)[1]
+            sub_scores = trans_to_cpu(sub_scores).detach().numpy()
+            targets = target.numpy()
+            for score, target in zip(sub_scores, targets):
+                hit20s[target].append(np.isin(target, score))
+                if len(np.where(score == target)[0]) == 0:
+                    mrr20s[target].append(0)
+                else:
+                    mrr20s[target].append(1 / (np.where(score == target)[0][0] + 1))
 
-        sub_scores = scores.topk(10)[1]
-        sub_scores = trans_to_cpu(sub_scores).detach().numpy()
-        for score, target in zip(sub_scores, targets):
-            hit10s[target].append(np.isin(target, score))
-            if len(np.where(score == target)[0]) == 0:
-                mrr10s[target].append(0)
-            else:
-                mrr10s[target].append(1 / (np.where(score == target)[0][0] + 1))
-        
-        sub_scores = scores.topk(5)[1]
-        sub_scores = trans_to_cpu(sub_scores).detach().numpy()
-        for score, target in zip(sub_scores, targets):
-            hit5s[target].append(np.isin(target, score))
-            if len(np.where(score == target)[0]) == 0:
-                mrr5s[target].append(0)
-            else:
-                mrr5s[target].append(1 / (np.where(score == target)[0][0] + 1))
+            sub_scores = scores.topk(10)[1]
+            sub_scores = trans_to_cpu(sub_scores).detach().numpy()
+            for score, target in zip(sub_scores, targets):
+                hit10s[target].append(np.isin(target, score))
+                if len(np.where(score == target)[0]) == 0:
+                    mrr10s[target].append(0)
+                else:
+                    mrr10s[target].append(1 / (np.where(score == target)[0][0] + 1))
+            
+            sub_scores = scores.topk(5)[1]
+            sub_scores = trans_to_cpu(sub_scores).detach().numpy()
+            for score, target in zip(sub_scores, targets):
+                hit5s[target].append(np.isin(target, score))
+                if len(np.where(score == target)[0]) == 0:
+                    mrr5s[target].append(0)
+                else:
+                    mrr5s[target].append(1 / (np.where(score == target)[0][0] + 1))
 
-    result.append(np.mean([np.mean(v) for v in hit5s.values()]) * 100)
-    result.append(np.mean([np.mean(v) for v in hit10s.values()]) * 100)
-    result.append(np.mean([np.mean(v) for v in hit20s.values()]) * 100)
-    result.append(np.mean([np.mean(v) for v in mrr5s.values()]) * 100)
-    result.append(np.mean([np.mean(v) for v in mrr10s.values()]) * 100)
-    result.append(np.mean([np.mean(v) for v in mrr20s.values()]) * 100)
-    return result
+        result.append(np.mean([np.mean(v) for v in hit5s.values()]) * 100)
+        result.append(np.mean([np.mean(v) for v in hit10s.values()]) * 100)
+        result.append(np.mean([np.mean(v) for v in hit20s.values()]) * 100)
+        result.append(np.mean([np.mean(v) for v in mrr5s.values()]) * 100)
+        result.append(np.mean([np.mean(v) for v in mrr10s.values()]) * 100)
+        result.append(np.mean([np.mean(v) for v in mrr20s.values()]) * 100)
+        return result
 
 import pandas as pd
 def read_sessions(filepath):
@@ -230,7 +233,7 @@ else:
 
 
 if __name__ == "__main__":
-    print(config.dataset, config.num_node, "lr:",config.lr, "lr_dc:",config.lr_dc, "lr_dc_step:",config.lr_dc_step, "dropout_local:",config.dropout_local)
+    print(config.dataset, config.num_node, "lr:",config.lr, "lr_dc:",config.lr_dc, "lr_dc_step:",config.lr_dc_step, "dropout_local:",config.dropout_local, "feat_drop:",config.feat_drop, "label_smooth:",config.lb_smooth, "window_size:", config.window_size)
     init_seed(42)
 
     # train_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/train.txt', 'rb'))
@@ -241,7 +244,7 @@ if __name__ == "__main__":
     # train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
     # test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
 
-    model = trans_to_cuda(SessionGraph4(num_node = config.num_node))
+    model = trans_to_cuda(Ensamble(num_node = config.num_node))
     # checkpoint = torch.load('/home/xl/lxl/model/DGL/data/'+config.dataset+"_model.pkl")
     # model_dict = model.state_dict()
     # state_dict = {k:v for k,v in checkpoint.items() if k in model_dict.keys()}
