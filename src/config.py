@@ -1,4 +1,4 @@
-dataset = 'yoochoose1_64'
+dataset = 'gowalla'
 num_node = 43098
 dim =256
 epoch = 10
@@ -6,7 +6,7 @@ activate = 'relu'
 batch_size = 512
 lr = 0.001
 lr_dc = 0.1
-lr_dc_step = 5
+lr_dc_step = 3
 l2 = 1e-5
 hop = 2
 dropout_local = 0
@@ -18,7 +18,9 @@ order = 1
 lb_smooth = 0.4
 
 l = 0.85
-window_size = 2
+window_size = 4
+unique = True
+add_self_loop = False
 
 # graph_path = "./data/"+dataset+"_edges.csv"
 
@@ -28,13 +30,13 @@ if dataset == "diginetica":
 
 elif dataset == "gowalla":
     lb_smooth = 0.8
-
+    
 elif dataset == "lastfm":
     lb_smooth = 0.8
 
 elif dataset == "Nowplaying":
     num_node = 60417
-    dropout_local = 0.0
+    lb_smooth = 0.4
 
 elif dataset == "Tmall":
     num_node = 40728

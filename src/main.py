@@ -9,7 +9,7 @@ import numpy as np
 import random
 import pickle
 from tqdm import tqdm
-from model import Ensamble, SessionGraph4
+from model import Ensamble,Ensamble2, SessionGraph4
 from utils import Data
 import torch.nn.functional as F
 import networkx as nx
@@ -61,7 +61,7 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     
     with tqdm(train_loader) as t:
         for data in t:
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
             model.optimizer.zero_grad()
             g0, g1, target0, target1 = data
             g0 = g0.to(torch.device('cuda'))
@@ -223,17 +223,17 @@ from utils import AugmentedDataset,Mix_AugmentedDataset
 if config.dataset in ['diginetica','gowalla','lastfm']:
     train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/"+config.dataset))
     config.num_node = num_items
-    train_data = Mix_AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions))
-    test_data = AugmentedDataset(test_sessions, training=False, train_len=len(train_sessions))
+    train_data = Mix_AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions), unique=config.unique, add_self_loop=config.add_self_loop)
+    test_data = AugmentedDataset(test_sessions, training=False, train_len=len(train_sessions), unique=config.unique, add_self_loop=config.add_self_loop)
 else:
     train_sessions = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/all_train_seq.txt', 'rb'))
-    train_data = Mix_AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions))
+    train_data = Mix_AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions), unique=config.unique, add_self_loop=config.add_self_loop)
     test_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/test.txt', 'rb'))
-    test_data = Data(test_data, is_train=False)
+    test_data = Data(test_data, is_train=False, unique=config.unique, add_self_loop=config.add_self_loop)
 
 
 if __name__ == "__main__":
-    print(config.dataset, config.num_node, "lr:",config.lr, "lr_dc:",config.lr_dc, "lr_dc_step:",config.lr_dc_step, "dropout_local:",config.dropout_local, "feat_drop:",config.feat_drop, "label_smooth:",config.lb_smooth, "window_size:", config.window_size)
+    print(config.dataset, config.num_node, "lr:",config.lr, "lr_dc:",config.lr_dc, "lr_dc_step:",config.lr_dc_step, "dropout_local:",config.dropout_local, "feat_drop:",config.feat_drop, "label_smooth:",config.lb_smooth, "window_size:", config.window_size, "unique:", config.unique, "add_self_loop:", config.add_self_loop)
     init_seed(42)
 
     # train_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/train.txt', 'rb'))
@@ -244,7 +244,7 @@ if __name__ == "__main__":
     # train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
     # test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
 
-    model = trans_to_cuda(Ensamble(num_node = config.num_node))
+    model = trans_to_cuda(Ensamble2(num_node = config.num_node))
     # checkpoint = torch.load('/home/xl/lxl/model/DGL/data/'+config.dataset+"_model.pkl")
     # model_dict = model.state_dict()
     # state_dict = {k:v for k,v in checkpoint.items() if k in model_dict.keys()}
