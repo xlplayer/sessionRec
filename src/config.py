@@ -18,17 +18,21 @@ order = 1
 lb_smooth = 0.4
 
 l = 0.85
-window_size = 4
+window_size = 2
 unique = True
 add_self_loop = False
+mixup = True
+if mixup:
+    lr_dc = 0.01
 
 # graph_path = "./data/"+dataset+"_edges.csv"
 
 if dataset == "diginetica":
     num_node = 43098
-    dropout_local=0.0
+    lb_smooth = 0.4
 
 elif dataset == "gowalla":
+    window_size = 4
     lb_smooth = 0.8
     
 elif dataset == "lastfm":
@@ -40,7 +44,7 @@ elif dataset == "Nowplaying":
 
 elif dataset == "Tmall":
     num_node = 40728
-    lb_smooth = 0.2
+    lb_smooth = 0.6
 
 elif dataset == "yoochoose1_4":
     num_node = 37484

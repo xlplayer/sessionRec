@@ -72,6 +72,8 @@ class Data(Dataset):
         g.nodes['target'].data['tid'] = torch.tensor([0])
         g.add_edges(seq_nid, [0]*len(seq_nid), etype='agg')
         g.edges['agg'].data['pid'] = torch.tensor(list(range(len(seq_nid))))
+        g.edges['agg'].data['pid1'] = torch.tensor(list(range(len(seq_nid))))
+        g.edges['agg'].data['pid2'] = torch.tensor(list(range(len(seq_nid))))
 
         return g, target
 
@@ -148,7 +150,10 @@ class AugmentedDataset:
         #agg
         g = dgl.add_nodes(g, 1, ntype='target')
         g.nodes['target'].data['tid'] = torch.tensor([0])
-        g.add_edges(seq_nid, [0]*len(seq_nid), {'pid':torch.tensor(list(range(len(seq_nid))))}, etype='agg')
+        g.add_edges(seq_nid, [0]*len(seq_nid), etype='agg')
+        g.edges['agg'].data['pid'] = torch.tensor(list(range(len(seq_nid))))
+        g.edges['agg'].data['pid1'] = torch.tensor(list(range(len(seq_nid))))
+        g.edges['agg'].data['pid2'] = torch.tensor(list(range(len(seq_nid))))
         return g, target
 
     def __len__(self):
@@ -211,7 +216,7 @@ class Mix_AugmentedDataset:
             category_id = anno["category_id"]
             num_list[self.cls2idx[category_id]] += 1
         max_num = max(num_list)
-        class_weight = [max_num / i for i in num_list]
+        class_weight = [(max_num / i)**2 for i in num_list]
         sum_weight = sum(class_weight)
         return class_weight, sum_weight
 
@@ -282,7 +287,10 @@ class Mix_AugmentedDataset:
             #agg
             g = dgl.add_nodes(g, 1, ntype='target')
             g.nodes['target'].data['tid'] = torch.tensor([0])
-            g.add_edges(seq_nid, [0]*len(seq_nid), {'pid':torch.tensor([i for i in range(len(seq_nid))] )}, etype='agg')
+            g.add_edges(seq_nid, [0]*len(seq_nid), etype='agg')
+            g.edges['agg'].data['pid'] = torch.tensor(list(range(len(seq_nid))))
+            g.edges['agg'].data['pid1'] = torch.tensor(list(range(len(seq_nid))))
+            g.edges['agg'].data['pid2'] = torch.tensor(list(range(len(seq_nid))))
 
             gs.append(g)
 

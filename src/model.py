@@ -18,7 +18,7 @@ from dgl.utils import expand_as_pair
 from dgl.nn.pytorch.utils import Identity
 import dgl.nn.pytorch as dglnn
 from entmax import sparsemax, entmax15, entmax_bisect
-from label_smooth import LabelSmoothSoftmaxCEV1
+from label_smooth import LabelSmoothSoftmaxCEV1, FocalLoss
 
 
 def udf_agg(edges):
@@ -529,6 +529,8 @@ class Ensamble2(nn.Module):
 
         self.embedding = nn.Embedding(self.num_node, config.dim)
         self.pos_embedding = nn.Embedding(200, config.dim)
+        self.pos_embedding1 = nn.Embedding(200, config.dim)
+        self.pos_embedding2 = nn.Embedding(200, config.dim)
         self.dis_embedding = nn.Embedding(50, config.dim)
         self.target_embedding = nn.Embedding(10, config.dim)
         self.feat_drop = nn.Dropout(feat_drop)
@@ -542,12 +544,15 @@ class Ensamble2(nn.Module):
             self.gat1.append(dglnn.HeteroGraphConv({"interacts":GATConv(config.dim, config.dim, num_heads, feat_drop, feat_drop, residual=True, allow_zero_in_degree=True)}, aggregate='sum'))
             self.gat2.append(dglnn.HeteroGraphConv({"interacts":GATConv(config.dim, config.dim, num_heads, feat_drop, feat_drop, residual=True, allow_zero_in_degree=True)}, aggregate='sum'))
             self.agg.append(PosAggregator(config.dim, i+1))
+            # self.agg.append(PosAttnReadout(config.dim, i+1))
             self.fc_sr.append(nn.Linear(2*config.dim, config.dim, bias=False))
             self.sc_sr.append(nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1)))
                     
 
-        self.alpha = nn.Parameter(torch.Tensor(self.order))
+        # self.alpha = nn.Parameter(torch.Tensor(self.order))
+        self.register_buffer('alpha', torch.Tensor(self.order))
         self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
+        # self.loss_function = FocalLoss(gamma=2)
         print('weight_decay:', config.weight_decay)
         if config.weight_decay > 0:
             params = fix_weight_decay(self)
@@ -558,7 +563,7 @@ class Ensamble2(nn.Module):
 
         self.reset_parameters()
         self.alpha.data = torch.zeros(self.order)
-        self.alpha.data[0] = torch.tensor(1.0)
+        # self.alpha.data[0] = torch.tensor(1.0)
         
     def reset_parameters(self):
         stdv = 1.0 / math.sqrt(config.dim)
@@ -571,7 +576,7 @@ class Ensamble2(nn.Module):
         h_v = F.normalize(h_v, dim=-1)
         
         h_d = self.dis_embedding(g.edges['interacts'].data['dis'])
-        h_p = self.pos_embedding(g.edges['agg'].data['pid'])
+        h_p = [self.pos_embedding(g.edges['agg'].data['pid']), self.pos_embedding1(g.edges['agg'].data['pid1']), self.pos_embedding2(g.edges['agg'].data['pid2'])]
         h_r = self.target_embedding(g.nodes['target'].data['tid'])
 
         feat, last_feat = [],[]
@@ -582,7 +587,7 @@ class Ensamble2(nn.Module):
             h2 = torch.max(h2['item'], dim=1)[0]
             h = h1+h2
             h = F.normalize(h, dim=-1)
-            x, y = self.agg[i](h, h_p, h_r, g)
+            x, y = self.agg[i](h, h_p[i], h_r, g)
             feat.append(x.unsqueeze(1))
             last_feat.append(y.unsqueeze(1))
         

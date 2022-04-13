@@ -19,6 +19,7 @@ import dgl
 
 
 def init_seed(seed=None):
+    dgl.seed(seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -39,13 +40,13 @@ def trans_to_cpu(variable):
     else:
         return variable
 
-def collate_fn_train(samples):
+def collate_fn_mix(samples):
     g0, g1, target0, target1 = zip(*samples)
     g0 = dgl.batch(g0)
     g1 = dgl.batch(g1)
     return g0, g1, torch.tensor(target0), torch.tensor(target1)
 
-def collate_fn_test(samples):
+def collate_fn(samples):
     g, target = zip(*samples)
     g = dgl.batch(g)
     return g, torch.tensor(target)
@@ -56,41 +57,40 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     model.train()
 
     total_loss = 0.0
-    train_loader = torch.utils.data.DataLoader(train_data, num_workers=20, batch_size=config.batch_size,
-                                               shuffle=False, pin_memory=True, collate_fn=collate_fn_train)
+    if config.mixup:
+        train_loader = torch.utils.data.DataLoader(train_data, num_workers=20, batch_size=config.batch_size,
+                                               shuffle=False, pin_memory=True, collate_fn=collate_fn_mix)
+    else:
+        train_loader = torch.utils.data.DataLoader(train_data, num_workers=20, batch_size=config.batch_size,
+                                               shuffle=False, pin_memory=True, collate_fn=collate_fn)
     
     with tqdm(train_loader) as t:
         for data in t:
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             model.optimizer.zero_grad()
-            g0, g1, target0, target1 = data
-            g0 = g0.to(torch.device('cuda'))
-            # g1 = g1.to(torch.device('cuda'))
-            targets0 = trans_to_cuda(target0).long()
-            # targets1 = trans_to_cuda(target1).long()
-            # loss1, loss2, regularization_loss = model(g0, g1, targets0, targets1, training=True)
-            # loss = loss1 + loss2 # + regularization_loss
-            # sr0 = model(g0, epoch, training=True)
-            # sr1 = model(g1, epoch, training=True)
-            # assert not torch.isnan(sr0[-1]).any() #mix
+            if config.mixup:
+                g0, g1, target0, target1 = data
+                g0 = g0.to(torch.device('cuda'))
+                g1 = g1.to(torch.device('cuda'))
+                targets0 = trans_to_cuda(target0).long()
+                targets1 = trans_to_cuda(target1).long()
+                score0 = model(g0, epoch, training=False)
+                score1 = model(g1, epoch, training=False)
 
-            # l = config.l
-            # mixed_sr = l * sr0 + (1-l) * sr1
-            # score = model.get_score(mixed_sr)
-            # loss = l * model.loss_function(score, targets0) + (1 - l) *  model.loss_function(score, targets1)
+                # l = config.l
+                l = 1-(epoch/10)**2
+                score = l * score0 + (1-l) * score1
+                loss = l * model.loss_function(score, targets0) + (1 - l) *  model.loss_function(score, targets1)
+            else:
+                g, target = data
+                g = g.to(torch.device('cuda'))
+                targets = trans_to_cuda(target).long()
+                loss = model(g, targets, training=True)
+            
 
-            # score = model.get_score(sr0, g0)
-            # loss = model.loss_function(score, targets0)
-            loss = model(g0, targets0, training=True)
 
-            # loss = F.nll_loss(scores, targets)
-            # loss = model.loss_function(scores, targets)
-            # loss1, loss2, loss_mix, regularization_loss = model.loss_function(scores, targets)
-            # loss = loss1 + loss2 + loss_mix +  regularization_loss
             t.set_postfix(
                         loss = loss.item(),
-                        # loss_mix = loss_mix.item(),
-                        # regularization_loss = regularization_loss.item(), 
                         lr = model.optimizer.state_dict()['param_groups'][0]['lr'])
             loss.backward()
             model.optimizer.step()
@@ -104,7 +104,7 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     torch.cuda.empty_cache()
     with torch.no_grad():
         test_loader = torch.utils.data.DataLoader(test_data, num_workers=20, batch_size=config.batch_size,
-                                                shuffle=True, pin_memory=True, collate_fn=collate_fn_test)
+                                                shuffle=True, pin_memory=True, collate_fn=collate_fn)
         result = []
         hit20, mrr20 = [], []
         hit10, mrr10 = [], []
@@ -223,11 +223,17 @@ from utils import AugmentedDataset,Mix_AugmentedDataset
 if config.dataset in ['diginetica','gowalla','lastfm']:
     train_sessions, test_sessions, num_items = read_dataset(Path("/home/xl/lxl/model/SessionRec-pytorch/src/datasets/"+config.dataset))
     config.num_node = num_items
-    train_data = Mix_AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions), unique=config.unique, add_self_loop=config.add_self_loop)
+    if config.mixup:
+        train_data = Mix_AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions), unique=config.unique, add_self_loop=config.add_self_loop)
+    else:
+        train_data = AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions), unique=config.unique, add_self_loop=config.add_self_loop)
     test_data = AugmentedDataset(test_sessions, training=False, train_len=len(train_sessions), unique=config.unique, add_self_loop=config.add_self_loop)
 else:
     train_sessions = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/all_train_seq.txt', 'rb'))
-    train_data = Mix_AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions), unique=config.unique, add_self_loop=config.add_self_loop)
+    if config.mixup:
+        train_data = Mix_AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions), unique=config.unique, add_self_loop=config.add_self_loop)
+    else:
+        train_data = AugmentedDataset(train_sessions, training=True, train_len=len(train_sessions), unique=config.unique, add_self_loop=config.add_self_loop)
     test_data = pickle.load(open('/home/xl/lxl/dataset/' + config.dataset + "/" +config.dataset + '/test.txt', 'rb'))
     test_data = Data(test_data, is_train=False, unique=config.unique, add_self_loop=config.add_self_loop)
 
