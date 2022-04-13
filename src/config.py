@@ -1,4 +1,4 @@
-dataset = 'gowalla'
+dataset = 'Tmall'
 num_node = 43098
 dim =256
 epoch = 10
@@ -21,9 +21,7 @@ l = 0.85
 window_size = 2
 unique = True
 add_self_loop = False
-mixup = True
-if mixup:
-    lr_dc = 0.01
+mixup = False
 
 # graph_path = "./data/"+dataset+"_edges.csv"
 

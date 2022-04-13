@@ -52,9 +52,10 @@ def collate_fn(samples):
     return g, torch.tensor(target)
 
 
-def train_test(model, train_data, test_data, epoch, train_sessions):
+def train_test(model1, model2, train_data, test_data, epoch, train_sessions):
     print('start training: ', datetime.datetime.now())
-    model.train()
+    model1.train()
+    model2.train()
 
     total_loss = 0.0
     if config.mixup:
@@ -66,41 +67,49 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     
     with tqdm(train_loader) as t:
         for data in t:
-            torch.cuda.empty_cache()
-            model.optimizer.zero_grad()
+            # torch.cuda.empty_cache()
+            model1.optimizer.zero_grad()
+            model2.optimizer.zero_grad()
             if config.mixup:
                 g0, g1, target0, target1 = data
                 g0 = g0.to(torch.device('cuda'))
                 g1 = g1.to(torch.device('cuda'))
                 targets0 = trans_to_cuda(target0).long()
                 targets1 = trans_to_cuda(target1).long()
-                score0 = model(g0, epoch, training=False)
-                score1 = model(g1, epoch, training=False)
+                score0 = model1(g0, epoch, training=False)
+                score1 = model1(g1, epoch, training=False)
 
                 # l = config.l
                 l = 1-(epoch/10)**2
                 score = l * score0 + (1-l) * score1
-                loss = l * model.loss_function(score, targets0) + (1 - l) *  model.loss_function(score, targets1)
+                loss1 = l * model1.loss_function(score, targets0) + (1 - l) *  model1.loss_function(score, targets1)
+                loss2 = model2(g0, targets0, training=True)
+                loss = loss1+loss2
             else:
                 g, target = data
                 g = g.to(torch.device('cuda'))
                 targets = trans_to_cuda(target).long()
-                loss = model(g, targets, training=True)
+                loss1 = model1(g, targets, training=True)
+                loss2 = model2(g, targets, training=True)
+                loss = loss1 + loss2
             
 
 
             t.set_postfix(
                         loss = loss.item(),
-                        lr = model.optimizer.state_dict()['param_groups'][0]['lr'])
+                        lr = model1.optimizer.state_dict()['param_groups'][0]['lr'])
             loss.backward()
-            model.optimizer.step()
+            model1.optimizer.step()
+            model2.optimizer.step()
             total_loss += loss
     print('\tLoss:\t%.3f' % total_loss)
 
-    model.scheduler.step()
+    model1.scheduler.step()
+    model2.scheduler.step()
 
     print('start predicting: ', datetime.datetime.now())
-    model.eval()
+    model1.eval()
+    model2.eval()
     torch.cuda.empty_cache()
     with torch.no_grad():
         test_loader = torch.utils.data.DataLoader(test_data, num_workers=20, batch_size=config.batch_size,
@@ -110,11 +119,10 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
         hit10, mrr10 = [], []
         hit5, mrr5 = [], []
         for data in test_loader:
-            model.optimizer.zero_grad()
             g, target = data
             g = g.to(torch.device('cuda'))
             targets = trans_to_cuda(target).long()
-            scores =  model(g, epoch)
+            scores =  model1(g, epoch) + model2(g, epoch)
 
             # scores = scores[-1] ###mix score
             assert not torch.isnan(scores).any()
@@ -159,11 +167,10 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
         hit10s, mrr10s = defaultdict(list), defaultdict(list)
         hit5s, mrr5s = defaultdict(list), defaultdict(list)
         for data in test_loader:
-            model.optimizer.zero_grad()
             g, target = data
             g = g.to(torch.device('cuda'))
             targets = trans_to_cuda(target).long()
-            scores =  model(g,g, epoch)
+            scores =  model1(g, epoch) + model2(g, epoch)
 
             # scores = scores[-1] ###mix score
             assert not torch.isnan(scores).any()
@@ -250,7 +257,8 @@ if __name__ == "__main__":
     # train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
     # test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
 
-    model = trans_to_cuda(Ensamble2(num_node = config.num_node))
+    model1 = trans_to_cuda(Ensamble2(num_node = config.num_node))
+    model2 = trans_to_cuda(Ensamble2(num_node = config.num_node))
     # checkpoint = torch.load('/home/xl/lxl/model/DGL/data/'+config.dataset+"_model.pkl")
     # model_dict = model.state_dict()
     # state_dict = {k:v for k,v in checkpoint.items() if k in model_dict.keys()}
@@ -264,7 +272,7 @@ if __name__ == "__main__":
     for epoch in range(config.epoch):
         print('-------------------------------------------------------')
         print('epoch: ', epoch)
-        hit5, hit10, hit20, mrr5, mrr10, mrr20, hit5s, hit10s, hit20s, mrr5s, mrr10s, mrr20s = train_test(model, train_data, test_data, epoch, train_sessions)
+        hit5, hit10, hit20, mrr5, mrr10, mrr20, hit5s, hit10s, hit20s, mrr5s, mrr10s, mrr20s = train_test(model1, model2, train_data, test_data, epoch, train_sessions)
         if hit5 >= best_result[0]:
             best_result[0] = hit5
             best_epoch[0] = epoch
