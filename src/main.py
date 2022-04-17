@@ -9,7 +9,7 @@ import numpy as np
 import random
 import pickle
 from tqdm import tqdm
-from model import Ensamble,Ensamble2, SessionGraph4
+from model import Ensamble,Ensamble2,SessionGraph3, SessionGraph4
 from utils import Data
 import torch.nn.functional as F
 import networkx as nx
@@ -257,7 +257,7 @@ if __name__ == "__main__":
     # train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
     # test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
 
-    model1 = trans_to_cuda(Ensamble2(num_node = config.num_node))
+    model1 = trans_to_cuda(SessionGraph3(num_node = config.num_node))
     model2 = trans_to_cuda(Ensamble2(num_node = config.num_node))
     # checkpoint = torch.load('/home/xl/lxl/model/DGL/data/'+config.dataset+"_model.pkl")
     # model_dict = model.state_dict()

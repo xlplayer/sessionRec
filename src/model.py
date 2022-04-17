@@ -83,8 +83,8 @@ class GATLayer(nn.Module):
             adj.edges['interacts'].data['d'] = h_d
             adj.apply_edges(dis_u_mul_v, etype='interacts')
             e = self.pi(adj.edges['interacts'].data['e'])
-            mask = torch.sigmoid(self.M(adj.edges['interacts'].data['mask']))
-            e = e * mask
+            # mask = torch.sigmoid(self.M(adj.edges['interacts'].data['mask']))
+            # e = e * mask
 
             adj.edges['interacts'].data['a'] = self.dropout_local(edge_softmax(adj['interacts'], e))
             adj.update_all(fn.u_mul_e('ft', 'a', 'm'), fn.sum('m', 'ft'), etype='interacts')
@@ -98,11 +98,8 @@ class GAT(nn.Module):
 
     def forward(self, h_0, h_d, g):
         h1 = self.layer1(h_0, h_d, g)
-        return h1
-        h1 = F.elu(h1+h_0)
-        h2 = self.layer2(h1, h_d, g)
-        h2 = F.elu(h2+h1)
-        return h2
+        # return h1
+        return h_0+h1
 
 
 # pylint: enable=W0235
@@ -262,7 +259,7 @@ class GATConv(nn.Module):
 
 
 class PosAggregator(nn.Module):
-    def __init__(self, dim, last_L):
+    def __init__(self, dim, last_L=1):
         super(PosAggregator, self).__init__()
         self.dim = dim
 
@@ -344,6 +341,69 @@ class PosAttnReadout(nn.Module):
 
             return g.nodes['target'].data['ft'], last_feat
 
+class SessionGraph3(nn.Module):
+    def __init__(self, num_node):
+        super(SessionGraph3, self).__init__()
+        self.num_node = num_node
+        print(self.num_node)
+
+        self.embedding = nn.Embedding(self.num_node, config.dim)
+        self.pos_embedding = nn.Embedding(200, config.dim)
+        self.dis_embedding1 = nn.Embedding(200, config.dim)
+        self.dis_embedding2 = nn.Embedding(200, config.dim)
+        self.target_embedding = nn.Embedding(10, config.dim)
+        self.feat_drop = nn.Dropout(config.feat_drop)
+        
+        self.gat1 = GAT(config.dim)
+        self.gat2 = GAT(config.dim)
+        self.agg = PosAggregator(config.dim)
+
+        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
+        print('weight_decay:', config.weight_decay)
+        if config.weight_decay > 0:
+            params = fix_weight_decay(self)
+        else:
+            params = self.parameters()
+        self.optimizer = torch.optim.Adam(params, lr=config.lr, weight_decay=config.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(config.dim)
+        for weight in self.parameters():
+            weight.data.uniform_(-stdv, stdv)
+        
+    
+    def forward(self, g, targets, epoch=None, training=False):
+        h_v = self.embedding(g.nodes['item'].data['iid'])
+        h_v = self.feat_drop(h_v)
+        h_v = F.normalize(h_v, dim=-1)
+        
+        h_d1 = self.dis_embedding1(g.edges['interacts'].data['dis'])
+        h_d2 = self.dis_embedding2(g.edges['interacts'].data['dis'])
+        h_p = self.pos_embedding(g.edges['agg'].data['pid'])
+        h_r = self.target_embedding(g.nodes['target'].data['tid'])
+
+        h1 = self.gat1(h_v, h_d1, g)
+        h2 = self.gat2(h_v, h_d2, g.reverse(copy_edata=True).edge_type_subgraph(['interacts']))
+        h = h1+h2
+        sr, sr_l = self.agg(h, h_p, h_r, g)    
+
+        b = self.embedding.weight#[1:config.num_node]  # n_nodes x latent_size
+
+        sr = F.normalize(sr, dim=-1)
+        b = F.normalize(b, dim=-1)
+        
+        logits = torch.matmul(sr, b.transpose(1, 0))
+        score = torch.softmax(12 * logits, dim=1).log()
+        
+        if not training:
+            return score
+
+        loss = self.loss_function(score, targets)
+        return loss
+        
 
 class SessionGraph4(nn.Module):
     def __init__(self, num_node, feat_drop=config.feat_drop, last_L=1, num_heads=8):
