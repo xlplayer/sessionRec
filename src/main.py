@@ -9,7 +9,7 @@ import numpy as np
 import random
 import pickle
 from tqdm import tqdm
-from model import Ensamble,Ensamble2, SessionGraph4
+from model import Ensamble
 from utils import Data
 import torch.nn.functional as F
 import networkx as nx
@@ -66,7 +66,7 @@ def train_test(model, train_data, test_data, epoch, train_sessions):
     
     with tqdm(train_loader) as t:
         for data in t:
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
             model.optimizer.zero_grad()
             if config.mixup:
                 g0, g1, target0, target1 = data
@@ -250,7 +250,7 @@ if __name__ == "__main__":
     # train_data = Data(train_data, edge2idx, edge2fre, adj, is_train=True)
     # test_data = Data(test_data, edge2idx, edge2fre, adj, is_train=False)
 
-    model = trans_to_cuda(Ensamble2(num_node = config.num_node))
+    model = trans_to_cuda(Ensamble(num_node = config.num_node))
     # checkpoint = torch.load('/home/xl/lxl/model/DGL/data/'+config.dataset+"_model.pkl")
     # model_dict = model.state_dict()
     # state_dict = {k:v for k,v in checkpoint.items() if k in model_dict.keys()}

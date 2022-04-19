@@ -67,9 +67,10 @@ def fix_weight_decay(model):
 
 
 class GATLayer(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, idx):
         super(GATLayer, self).__init__()
         self.dim = dim
+        self.idx = idx
 
         self.pi =  nn.Linear(self.dim, 1, bias=False)
         self.M = nn.Linear(2*self.dim, 1, bias=False)
@@ -78,31 +79,29 @@ class GATLayer(nn.Module):
     def forward(self, h_v, h_d, g):
         with g.local_scope():
             ###item to item
-            adj = g.edge_type_subgraph(['interacts'])
+            adj = g.edge_type_subgraph(['interacts'+str(self.idx)])
             adj.nodes['item'].data['ft'] = h_v
-            adj.edges['interacts'].data['d'] = h_d
-            adj.apply_edges(dis_u_mul_v, etype='interacts')
-            e = self.pi(adj.edges['interacts'].data['e'])
-            mask = torch.sigmoid(self.M(adj.edges['interacts'].data['mask']))
-            e = e * mask
+            adj.edges['interacts'+str(self.idx)].data['d'] = h_d
+            adj.apply_edges(dis_u_mul_v, etype='interacts'+str(self.idx))
+            e = self.pi(adj.edges['interacts'+str(self.idx)].data['e'])
+            # mask = torch.sigmoid(self.M(adj.edges['interacts'+str(self.idx)].data['mask']))
+            # e = e * mask
 
-            adj.edges['interacts'].data['a'] = self.dropout_local(edge_softmax(adj['interacts'], e))
-            adj.update_all(fn.u_mul_e('ft', 'a', 'm'), fn.sum('m', 'ft'), etype='interacts')
+            adj.edges['interacts'+str(self.idx)].data['a'] = self.dropout_local(edge_softmax(adj['interacts'+str(self.idx)], e))
+            adj.update_all(fn.u_mul_e('ft', 'a', 'm'), fn.sum('m', 'ft'), etype='interacts'+str(self.idx))
             return adj.nodes['item'].data['ft']
 
 class GAT(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, idx=0):
         super(GAT, self).__init__()
-        self.layer1 = GATLayer(dim)
+        self.layer1 = GATLayer(dim, idx=idx)
         # self.layer2 = GATLayer(dim)
 
     def forward(self, h_0, h_d, g):
         h1 = self.layer1(h_0, h_d, g)
-        return h1
-        h1 = F.elu(h1+h_0)
-        h2 = self.layer2(h1, h_d, g)
-        h2 = F.elu(h2+h1)
-        return h2
+        # return h1
+        return h_0+h1
+       
 
 
 # pylint: enable=W0235
@@ -262,7 +261,7 @@ class GATConv(nn.Module):
 
 
 class PosAggregator(nn.Module):
-    def __init__(self, dim, last_L):
+    def __init__(self, dim, last_L=1):
         super(PosAggregator, self).__init__()
         self.dim = dim
 
@@ -282,18 +281,6 @@ class PosAggregator(nn.Module):
             e = self.q(torch.cat([adj.edata['ft'], adj.edata['pos']], dim=-1))
             adj.edata['e'] = torch.tanh(e)
 
-            
-            # last_feats = []
-            # for i in range(self.last_L):
-            #     last_nodes = adj.filter_nodes(lambda nodes: nodes.data['last'][:,i]==1, ntype='item')
-            #     last_feats.append(adj.nodes['item'].data['ft'][last_nodes])
-            # last_feats = last_feats[::-1]
-            # last_feats = torch.stack(last_feats,dim=1)
-            # invar = torch.mean(last_feats, dim=1)
-            # var = self.GRU(last_feats)[1].permute(1, 0, 2).squeeze()
-            # last_feat = 0.5 * invar + 0.5 * var
-            # last_feat = last_feat.unsqueeze(1).repeat(1,1,1).view(-1, config.dim)
-            
             last_nodes = adj.filter_nodes(lambda nodes: nodes.data['last'][:,0]==1, ntype='item')
             last_feat = adj.nodes['item'].data['ft'][last_nodes]
             last_feat = last_feat.unsqueeze(1).repeat(1,1,1).view(-1, config.dim)
@@ -304,249 +291,35 @@ class PosAggregator(nn.Module):
 
             return g.nodes['target'].data['ft'], last_feat
 
-class PosAttnReadout(nn.Module):
-    def __init__(self, dim, last_L):
-        super(PosAttnReadout, self).__init__()
-        self.dim = dim
 
-        self.fc_u = nn.Linear(2*self.dim, self.dim, bias=True)
-        self.fc_v = nn.Linear(self.dim, self.dim, bias=False)
-        self.fc_e = nn.Linear(self.dim, 1, bias=False)
-        self.GRU = nn.GRU(self.dim, self.dim, 1, True, True)
-        self.last_L = last_L
-
-
-    def forward(self, h_v, h_p, h_t, g):
-        with g.local_scope():
-            adj = g.edge_type_subgraph(['agg'])
-            adj.nodes['item'].data['ft'] = h_v
-            adj.nodes['target'].data['ft'] = h_t
-            adj.edges['agg'].data['pos'] = h_p
-            adj.apply_edges(fn.copy_src('ft','ft'))
-            feat_u = self.fc_u(torch.cat([adj.edata['ft'], adj.edata['pos']], dim=-1))
-            
-            last_nodes = adj.filter_nodes(lambda nodes: nodes.data['last'][:,0]==1, ntype='item')
-            last_feat = adj.nodes['item'].data['ft'][last_nodes]
-
-            batch_num_nodes = g.batch_num_nodes('item')
-            idx = torch.cat(tuple(torch.ones(batch_num_nodes[j])*j for j in range(len(batch_num_nodes)))).long()
-            adj.nodes['item'].data['target_ft'] = self.fc_v(last_feat[idx])
-            adj.apply_edges(fn.copy_src('target_ft','target_ft'))
-            feat_v = adj.edata['target_ft']
-
-            adj.edata['e'] = feat_u + feat_v
-
-            adj.apply_edges(fn.v_mul_e('ft','e','eh'))
-            e = self.fc_e(torch.sigmoid(adj.edata['eh']))
-
-            adj.edata['a'] = edge_softmax(adj, e)
-            adj.update_all(fn.u_mul_e('ft', 'a', 'm'),fn.sum('m', 'ft'))
-
-            return g.nodes['target'].data['ft'], last_feat
-
-
-class SessionGraph4(nn.Module):
-    def __init__(self, num_node, feat_drop=config.feat_drop, last_L=1, num_heads=8):
-        super(SessionGraph4, self).__init__()
-        self.num_node = num_node
-        print(self.num_node)
-
-        self.embedding = nn.Embedding(self.num_node, config.dim)
-        self.pos_embedding = nn.Embedding(200, config.dim)
-        self.dis_embedding = nn.Embedding(50, num_heads * config.dim)
-        self.target_embedding = nn.Embedding(10, config.dim)
-        self.feat_drop = nn.Dropout(feat_drop)
-        # self.phi = nn.Parameter(torch.Tensor(2))
-        self.sc_sr = nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1))
-
-        # self.gat = GAT(config.dim)
-        self.gat1 = dglnn.HeteroGraphConv({"interacts":GATConv(config.dim, config.dim, num_heads, feat_drop, feat_drop, residual=True, allow_zero_in_degree=True)}, aggregate='sum')
-        self.gat2 = dglnn.HeteroGraphConv({"interacts":GATConv(config.dim, config.dim, num_heads, feat_drop, feat_drop, residual=True, allow_zero_in_degree=True)}, aggregate='sum')
-        self.agg = PosAggregator(config.dim, last_L)
-        # self.agg = PosAttnReadout(config.dim, last_L)
-        self.fc_sr = nn.Linear(2*config.dim, config.dim, bias=False)
-
-        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
-        print('weight_decay:', config.weight_decay)
-        if config.weight_decay > 0:
-            params = fix_weight_decay(self)
-        else:
-            params = self.parameters()
-        self.optimizer = torch.optim.Adam(params, lr=config.lr, weight_decay=config.weight_decay)
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        stdv = 1.0 / math.sqrt(config.dim)
-        for weight in self.parameters():
-            weight.data.uniform_(-stdv, stdv)
-        
-    
-    def forward(self, g, epoch=None, pos_mask=None, neg_mask=None, training=False):
-        h_v = self.embedding(g.nodes['item'].data['iid'])
-        h_v = self.feat_drop(h_v)
-        h_v = F.normalize(h_v, dim=-1)
-        
-        h_d = self.dis_embedding(g.edges['interacts'].data['dis'])
-        h_p = self.pos_embedding(g.edges['agg'].data['pid'])
-        h_r = self.target_embedding(g.nodes['target'].data['tid'])
-
-        # h = self.gat(h_v, h_d, g)
-        h1 = self.gat1(g.edge_type_subgraph(['interacts']), {'item':h_v})
-        h1 = torch.max(h1['item'], dim=1)[0]
-        h2 = self.gat2(g.reverse(copy_edata=True).edge_type_subgraph(['interacts']), {'item':h_v})
-        h2 = torch.max(h2['item'], dim=1)[0]
-        h = h1+h2
-        h = F.normalize(h, dim=-1)
-        sr_g, sr_l = self.agg(h, h_p, h_r, g)
-        sr  = self.fc_sr(torch.cat([sr_g, sr_l], dim=-1))
-        # sr = sr_g
-
-        b = self.embedding.weight#[1:config.num_node]  # n_nodes x latent_size
-
-        sr = F.normalize(sr, dim=-1)
-        if training:
-            return sr
-
-        b = F.normalize(b, dim=-1)
-        
-        logits = torch.matmul(sr, b.transpose(1, 0))
-        # score = torch.softmax(12 * logits, dim=1).log()
-        # return score
-
-        # phi = torch.softmax(self.phi, dim=-1)
-        # phi = phi.unsqueeze(0).unsqueeze(-1).repeat(sr.size(0),1,1)
-        phi = self.sc_sr(sr).unsqueeze(-1)
-        mask = torch.zeros(phi.size(0), config.num_node).cuda()
-        iids = torch.split(g.nodes['item'].data['iid'], g.batch_num_nodes('item').tolist())
-        for i in range(len(mask)):
-            mask[i, iids[i]] = 1
-        # print(iids)
-        logits_in = logits.masked_fill(~mask.bool(), float('-inf'))
-        logits_ex = logits.masked_fill(mask.bool(), float('-inf'))
-        score     = torch.softmax(12 * logits_in, dim=-1)
-        score_ex  = torch.softmax(12 * logits_ex, dim=-1) 
-        assert not torch.isnan(score).any()
-        assert not torch.isnan(score_ex).any()
-
-        phi = phi.squeeze(1)
-        score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
-        return torch.log(score)
-
-    def get_score(self, sr, g=None):
-        b = self.embedding.weight#[1:config.num_node]  # n_nodes x latent_size
-        b = F.normalize(b, dim=-1)
-        
-        logits = torch.matmul(sr, b.transpose(1, 0))
-        # score = torch.softmax(12 * logits, dim=1).log()
-        # return score
-
-        # phi = torch.softmax(self.phi, dim=-1)
-        # phi = phi.unsqueeze(0).unsqueeze(-1).repeat(sr.size(0),1,1)
-        phi = self.sc_sr(sr).unsqueeze(-1)
-        mask = torch.zeros(phi.size(0), config.num_node).cuda()
-        iids = torch.split(g.nodes['item'].data['iid'], g.batch_num_nodes('item').tolist())
-        for i in range(len(mask)):
-            mask[i, iids[i]] = 1
-        # print(iids)
-        logits_in = logits.masked_fill(~mask.bool(), float('-inf'))
-        logits_ex = logits.masked_fill(mask.bool(), float('-inf'))
-        score     = torch.softmax(12 * logits_in, dim=-1)
-        score_ex  = torch.softmax(12 * logits_ex, dim=-1) 
-        assert not torch.isnan(score).any()
-        assert not torch.isnan(score_ex).any()
-
-        phi = phi.squeeze(1)
-        score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
-        return score
-        return torch.log(score)
-    
-
-class Ensamble(nn.Module):
-    def __init__(self, num_node):
-        super(Ensamble, self).__init__()
-        self.model1 = SessionGraph4(num_node = num_node, feat_drop=config.feat_drop, last_L=1)
-        self.model2 = SessionGraph4(num_node = num_node, feat_drop=config.feat_drop, last_L=2)
-        self.model3 = SessionGraph4(num_node = num_node, feat_drop=config.feat_drop, last_L=3)
-        self.phi = nn.Parameter(torch.Tensor(3))
-        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
-        print('weight_decay:', config.weight_decay)
-        if config.weight_decay > 0:
-            params = fix_weight_decay(self)
-        else:
-            params = self.parameters()
-        self.optimizer = torch.optim.Adam(params, lr=config.lr, weight_decay=config.weight_decay)
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
-
-        self.reset_parameters()
-        self.phi.data[0] = 0
-        self.phi.data[1] = 0
-        self.phi.data[2] = 0
-
-    def reset_parameters(self):
-        stdv = 1.0 / math.sqrt(config.dim)
-        for weight in self.parameters():
-            weight.data.uniform_(-stdv, stdv)
-    
-    def forward(self, g, targets, epoch=None, training=False):
-        sr1 = self.model1(g, epoch, training=True)
-        sr2 = self.model2(g, epoch, training=True)
-        sr3 = self.model3(g, epoch, training=True)
-        scores1 = self.model1.get_score(sr1, g)
-        scores2 = self.model2.get_score(sr2, g)
-        scores3 = self.model3.get_score(sr3, g)
-
-        phi = torch.softmax(self.phi, dim=-1)
-        phi = phi.unsqueeze(0).unsqueeze(-1).repeat(scores1.size(0),1,1)
-        score_mix = torch.sum(torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1), scores3.unsqueeze(1)], dim=1) * phi, dim=1)
-
-        if not training:
-            return score_mix
-
-        loss = self.loss_function(score_mix.log(), targets)
-        return loss
-
-        score_cat = torch.cat([scores1.unsqueeze(1), scores2.unsqueeze(1)], dim=1)
-        loss1 = self.model1.loss_function(scores1.log(), targets) 
-        loss2 = self.model2.loss_function(scores2.log(), targets) 
-        loss3 = self.model3.loss_function(scores3.log(), targets) 
-
-        epsilon = 1e-8
-        score_mix = torch.unsqueeze(score_mix, 1)
-        with torch.no_grad():
-            kl_loss = torch.sum(score_mix * (torch.log(score_mix + epsilon) - torch.log(score_cat + epsilon)), dim=-1)
-        regularization_loss  = torch.mean(torch.sum(kl_loss, dim=-1), dim=-1)
-
-        return loss1, loss2, regularization_loss
-
-class Ensamble2(nn.Module):
-    def __init__(self, num_node, feat_drop=config.feat_drop, num_heads=8, order=3):
-        super(Ensamble2, self).__init__()
+class HardSession(nn.Module):
+    def __init__(self, num_node, feat_drop=config.feat_drop, num_heads=8, order=3, pos_embedding=None, dis_embedding = None, target_embedding = None, share=True):
+        super(HardSession, self).__init__()
         self.num_node = num_node
         self.order = order
         print(self.num_node)
-
         self.embedding = nn.Embedding(self.num_node, config.dim)
-        self.pos_embedding = nn.Embedding(200, config.dim)
-        self.pos_embedding1 = nn.Embedding(200, config.dim)
-        self.pos_embedding2 = nn.Embedding(200, config.dim)
-        self.dis_embedding = nn.Embedding(50, config.dim)
-        self.target_embedding = nn.Embedding(10, config.dim)
+
+        if share:
+            self.pos_embedding = pos_embedding
+            self.dis_embedding = dis_embedding
+            self.target_embedding = target_embedding
+        else:
+            self.pos_embedding = nn.Embedding(200, config.dim)
+            self.dis_embedding = nn.Embedding(50, config.dim)
+            self.target_embedding = nn.Embedding(10, config.dim)
         self.feat_drop = nn.Dropout(feat_drop)
         
         self.gat1   = nn.ModuleList()
         self.gat2 = nn.ModuleList()
         self.agg = nn.ModuleList()
         self.fc_sr = nn.ModuleList()
-        self.sc_sr = nn.ModuleList()
+        self.sc_sr = nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1))
         for i in range(self.order):
-            self.gat1.append(dglnn.HeteroGraphConv({"interacts":GATConv(config.dim, config.dim, num_heads, feat_drop, feat_drop, residual=True, allow_zero_in_degree=True)}, aggregate='sum'))
-            self.gat2.append(dglnn.HeteroGraphConv({"interacts":GATConv(config.dim, config.dim, num_heads, feat_drop, feat_drop, residual=True, allow_zero_in_degree=True)}, aggregate='sum'))
+            self.gat1.append(dglnn.HeteroGraphConv({"interacts"+str(i):GATConv(config.dim, config.dim, num_heads, feat_drop, feat_drop, residual=True, allow_zero_in_degree=True)}, aggregate='sum'))
+            self.gat2.append(dglnn.HeteroGraphConv({"interacts"+str(i):GATConv(config.dim, config.dim, num_heads, feat_drop, feat_drop, residual=True, allow_zero_in_degree=True)}, aggregate='sum'))
             self.agg.append(PosAggregator(config.dim, i+1))
-            # self.agg.append(PosAttnReadout(config.dim, i+1))
             self.fc_sr.append(nn.Linear(2*config.dim, config.dim, bias=False))
-            self.sc_sr.append(nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1)))
                     
 
         # self.alpha = nn.Parameter(torch.Tensor(self.order))
@@ -575,19 +348,22 @@ class Ensamble2(nn.Module):
         h_v = self.feat_drop(h_v)
         h_v = F.normalize(h_v, dim=-1)
         
-        h_d = self.dis_embedding(g.edges['interacts'].data['dis'])
-        h_p = [self.pos_embedding(g.edges['agg'].data['pid']), self.pos_embedding1(g.edges['agg'].data['pid1']), self.pos_embedding2(g.edges['agg'].data['pid2'])]
+        h_d = []
+        for i in range(config.window_size):
+            h_d.append(self.dis_embedding(g.edges['interacts'+str(i)].data['dis']))
+
+        h_p = self.pos_embedding(g.edges['agg'].data['pid'])
         h_r = self.target_embedding(g.nodes['target'].data['tid'])
 
         feat, last_feat = [],[]
         for i in range(self.order):
-            h1 = self.gat1[i](g.edge_type_subgraph(['interacts']), {'item':h_v})
+            h1 = self.gat1[i](g.edge_type_subgraph(['interacts'+str(i)]), {'item':h_v})
             h1 = torch.max(h1['item'], dim=1)[0]
-            h2 = self.gat2[i](g.reverse(copy_edata=True).edge_type_subgraph(['interacts']), {'item':h_v})
+            h2 = self.gat2[i](g.reverse(copy_edata=True).edge_type_subgraph(['interacts'+str(i)]), {'item':h_v})
             h2 = torch.max(h2['item'], dim=1)[0]
             h = h1+h2
             h = F.normalize(h, dim=-1)
-            x, y = self.agg[i](h, h_p[i], h_r, g)
+            x, y = self.agg[i](h, h_p, h_r, g)
             feat.append(x.unsqueeze(1))
             last_feat.append(y.unsqueeze(1))
         
@@ -601,7 +377,7 @@ class Ensamble2(nn.Module):
         b = F.normalize(b, dim=-1)
 
         logits = sr @ b.t()
-        phi = self.sc_sr[0](sr).unsqueeze(-1)
+        phi = self.sc_sr(sr).unsqueeze(-1)
         mask = torch.zeros(phi.size(0), config.num_node).cuda()
         iids = torch.split(g.nodes['item'].data['iid'], g.batch_num_nodes('item').tolist())
         for i in range(len(mask)):
@@ -611,10 +387,17 @@ class Ensamble2(nn.Module):
         logits_ex = logits.masked_fill(mask.bool().unsqueeze(1), float('-inf'))
         score     = torch.softmax(12 * logits_in.squeeze(), dim=-1)
         score_ex  = torch.softmax(12 * logits_ex.squeeze(), dim=-1)
-        score = (torch.cat((score.unsqueeze(2), score_ex.unsqueeze(2)), dim=2) * phi).sum(2)
+        if self.order == 1:
+            phi = phi.squeeze(1)
+            score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
+        else:
+            score = (torch.cat((score.unsqueeze(2), score_ex.unsqueeze(2)), dim=2) * phi).sum(2)
 
-        alpha = torch.softmax(self.alpha.unsqueeze(0), dim=-1).view(1, self.alpha.size(0), 1)
-        score = (score * alpha.repeat(score.size(0), 1, 1)).sum(1)
+        if self.order>1:
+            alpha = torch.softmax(self.alpha.unsqueeze(0), dim=-1).view(1, self.alpha.size(0), 1)
+            score = (score * alpha.repeat(score.size(0), 1, 1)).sum(1)
+        else:
+            score = score.squeeze(1)
         score = torch.log(score)
 
         if not training:
@@ -623,3 +406,140 @@ class Ensamble2(nn.Module):
         loss = self.loss_function(score, targets)
         return loss
         
+class EasySession(nn.Module):
+    def __init__(self, num_node, order=3, pos_embedding=None, dis_embedding = None, target_embedding = None, share=True):
+        super(EasySession, self).__init__()
+        self.num_node = num_node
+        self.order = order
+        print(self.num_node)
+        self.register_buffer('alpha', torch.Tensor(self.order))
+        self.embedding = nn.Embedding(self.num_node, config.dim)
+
+        if share:
+            self.pos_embedding = pos_embedding
+            self.dis_embedding = dis_embedding
+            self.target_embedding = target_embedding
+        else:
+            self.pos_embedding = nn.Embedding(200, config.dim)
+            self.dis_embedding = nn.Embedding(50, config.dim)
+            self.target_embedding = nn.Embedding(10, config.dim)
+        self.feat_drop = nn.Dropout(config.feat_drop)
+        self.gat1   = nn.ModuleList()
+        self.gat2 = nn.ModuleList()
+        self.agg = nn.ModuleList()
+        self.fc_sr = nn.ModuleList()
+        for i in range(self.order):
+            self.gat1.append(GAT(config.dim, idx=i))
+            self.gat2.append(GAT(config.dim, idx=i))
+            self.agg.append(PosAggregator(config.dim))
+            self.fc_sr.append(nn.Linear(2*config.dim, config.dim, bias=False))
+
+        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
+        print('weight_decay:', config.weight_decay)
+        if config.weight_decay > 0:
+            params = fix_weight_decay(self)
+        else:
+            params = self.parameters()
+        self.optimizer = torch.optim.Adam(params, lr=config.lr, weight_decay=config.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
+
+        self.reset_parameters()
+        self.alpha.data = torch.zeros(self.order)
+
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(config.dim)
+        for weight in self.parameters():
+            weight.data.uniform_(-stdv, stdv)
+        
+    
+    def forward(self, g, targets, epoch=None, training=False):
+        h_v = self.embedding(g.nodes['item'].data['iid'])
+        h_v = self.feat_drop(h_v)
+        h_v = F.normalize(h_v, dim=-1)
+        
+        h_d = []
+        for i in range(config.window_size):
+            h_d.append(self.dis_embedding(g.edges['interacts'+str(i)].data['dis']))
+
+        h_p = self.pos_embedding(g.edges['agg'].data['pid'])
+        h_r = self.target_embedding(g.nodes['target'].data['tid'])
+
+        feat, last_feat = [],[]
+        for i in range(self.order):
+            h1 =self.gat1[i](h_v, h_d[i], g)
+            h2 = self.gat2[i](h_v, h_d[i], g.reverse(copy_edata=True).edge_type_subgraph(['interacts'+str(i)]))
+            h = h1+h2
+            h = F.normalize(h, dim=-1)
+
+            x, y = self.agg[i](h, h_p, h_r, g)
+            feat.append(x.unsqueeze(1))
+            last_feat.append(y.unsqueeze(1))
+
+       
+        sr_g = torch.cat(feat, dim=1)
+        sr_l = torch.cat(last_feat, dim=1)
+        sr   = torch.cat([sr_l, sr_g], dim=-1)
+        sr   = torch.cat([self.fc_sr[i](sr).unsqueeze(1) for i, sr in enumerate(torch.unbind(sr, dim=1))], dim=1)
+
+        sr = F.normalize(sr, dim=-1)
+        b = self.embedding.weight
+        b = F.normalize(b, dim=-1)
+
+        logits = sr @ b.t()
+        score = torch.softmax(12 * logits.squeeze(), dim=-1)
+        
+        if self.order>1:
+            alpha = torch.softmax(self.alpha.unsqueeze(0), dim=-1).view(1, self.alpha.size(0), 1)
+            score = (score * alpha.repeat(score.size(0), 1, 1)).sum(1)
+        else:
+            score = score.squeeze(1)
+        score = torch.log(score)
+
+        if not training:
+            return score
+
+        loss = self.loss_function(score, targets)
+        return loss
+
+
+class Ensamble(nn.Module):
+    def __init__(self, num_node, feat_drop=config.feat_drop, num_heads=8, order=3):
+        super(Ensamble, self).__init__()
+        self.num_node = num_node
+        self.order = order
+
+        self.pos_embedding = nn.Embedding(200, config.dim)
+        self.dis_embedding = nn.Embedding(200, config.dim)
+        self.target_embedding = nn.Embedding(10, config.dim)
+        
+
+        self.esay = EasySession(num_node=num_node, order = order, pos_embedding=self.pos_embedding, dis_embedding = self.dis_embedding, target_embedding = self.target_embedding, share=True)
+        self.hard = HardSession(num_node=num_node, feat_drop=feat_drop, num_heads=num_heads, order=order, pos_embedding=self.pos_embedding, dis_embedding = self.dis_embedding, target_embedding = self.target_embedding, share=True)
+        
+        self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
+        print('weight_decay:', config.weight_decay)
+        if config.weight_decay > 0:
+            params = fix_weight_decay(self)
+        else:
+            params = self.parameters()
+        self.optimizer = torch.optim.Adam(params, lr=config.lr, weight_decay=config.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(config.dim)
+        for weight in self.parameters():
+            weight.data.uniform_(-stdv, stdv)
+        
+    
+    def forward(self, g, targets, epoch=None, training=False):
+        score1 = self.esay(g, targets, training=False)
+        score2 = self.hard(g, targets, training=False)
+        score = score1+score2
+
+        if not training:
+            return score
+
+        loss = self.loss_function(score, targets)
+        return loss

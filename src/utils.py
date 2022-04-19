@@ -37,9 +37,11 @@ class Data(Dataset):
         item2id = {n:i for i,n in enumerate(items)}
 
         graph_data = {
-            ('item', 'interacts', 'item'):([],[]),
             ('item', 'agg', 'target'):([],[])
         }
+        for i in range(config.window_size):
+            graph_data[('item', 'interacts'+str(i), 'item')] = ([],[])
+
         g = dgl.heterograph(graph_data)
         
         g = dgl.add_nodes(g, len(items), ntype='item')
@@ -55,17 +57,18 @@ class Data(Dataset):
         if self.add_self_loop:
             g.add_edges(list(set(seq_nid)), list(set(seq_nid)), {'dis': torch.zeros(len(list(set(seq_nid))), dtype=torch.long)}, etype='interacts')
 
-        for i in range(1,config.window_size):
-            src = seq_nid[:-i]
-            dst = seq_nid[i:]
+        for i in range(config.window_size):
+            src, dst = [], []
+            for j in range(i+1, i+2):
+                src = src + seq_nid[:-j]
+                dst = dst + seq_nid[j:]
             if self.unique:
                 edges = set(zip(src,dst))
             else:
                 edges = list(zip(src,dst))
             if len(edges):
                 src, dst = zip(*edges)
-                g.add_edges(src, dst, {'dis':(2*i)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
-                # g.add_edges(dst, src, {'dis':(2*i-1)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
+                g.add_edges(src, dst, {'dis':(i)*torch.ones(len(src), dtype=torch.long)}, etype='interacts'+str(i))
                
         #agg
         g = dgl.add_nodes(g, 1, ntype='target')
@@ -115,10 +118,10 @@ class AugmentedDataset:
         item2id = {n:i for i,n in enumerate(items)}
 
         graph_data = {
-            ('item', 'interacts', 'item'):([],[]),
-            ('item', 'agg', 'target'):([],[]),
-            ('target', 'overlap', 'target'):([],[])
+            ('item', 'agg', 'target'):([],[])
         }
+        for i in range(config.window_size):
+            graph_data[('item', 'interacts'+str(i), 'item')] = ([],[])
         g = dgl.heterograph(graph_data)
         
         g = dgl.add_nodes(g, len(items), ntype='item')
@@ -134,18 +137,18 @@ class AugmentedDataset:
         if self.add_self_loop:
             g.add_edges(list(set(seq_nid)), list(set(seq_nid)), {'dis': torch.zeros(len(list(set(seq_nid))), dtype=torch.long)}, etype='interacts')
         
-        for i in range(1,config.window_size):
-            src = seq_nid[:-i]
-            dst = seq_nid[i:]
-
+        for i in range(config.window_size):
+            src, dst = [], []
+            for j in range(1, i+2):
+                src = src + seq_nid[:-j]
+                dst = dst + seq_nid[j:]
             if self.unique:
                 edges = set(zip(src,dst))
             else:
                 edges = list(zip(src,dst))
             if len(edges):
                 src, dst = zip(*edges)
-                g.add_edges(src, dst, {'dis':(2*i)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
-                # g.add_edges(dst, src, {'dis':(2*i-1)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
+                g.add_edges(src, dst, {'dis':(i)*torch.ones(len(src), dtype=torch.long)}, etype='interacts'+str(i))
 
         #agg
         g = dgl.add_nodes(g, 1, ntype='target')
@@ -253,10 +256,10 @@ class Mix_AugmentedDataset:
             item2id = {n:i for i,n in enumerate(items)}
 
             graph_data = {
-                ('item', 'interacts', 'item'):([],[]),
-                ('item', 'agg', 'target'):([],[]),
-                ('target', 'overlap', 'target'):([],[])
+                ('item', 'agg', 'target'):([],[])
             }
+            for i in range(config.window_size):
+                graph_data[('item', 'interacts'+str(i), 'item')] = ([],[])
             g = dgl.heterograph(graph_data)
             
             g = dgl.add_nodes(g, len(items), ntype='item')
@@ -272,17 +275,18 @@ class Mix_AugmentedDataset:
             if self.add_self_loop:
                 g.add_edges(list(set(seq_nid)), list(set(seq_nid)), {'dis': torch.zeros(len(list(set(seq_nid))), dtype=torch.long)}, etype='interacts')
             
-            for i in range(1,config.window_size):
-                src = seq_nid[:-i]
-                dst = seq_nid[i:]
+            for i in range(config.window_size):
+                src, dst = [], []
+                for j in range(1, i+2):
+                    src = src + seq_nid[:-j]
+                    dst = dst + seq_nid[j:]
                 if self.unique:
                     edges = set(zip(src,dst))
                 else:
                     edges = list(zip(src,dst))
                 if len(edges):
                     src, dst = zip(*edges)
-                    g.add_edges(src, dst, {'dis':(2*i)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')
-                    # g.add_edges(dst, src, {'dis':(2*i-1)*torch.ones(len(src), dtype=torch.long)}, etype='interacts')  
+                    g.add_edges(src, dst, {'dis':(i)*torch.ones(len(src), dtype=torch.long)}, etype='interacts'+str(i))
                     
             #agg
             g = dgl.add_nodes(g, 1, ntype='target')

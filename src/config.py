@@ -1,4 +1,4 @@
-dataset = 'gowalla'
+dataset = 'diginetica'
 num_node = 43098
 dim =256
 epoch = 10
@@ -18,12 +18,10 @@ order = 1
 lb_smooth = 0.4
 
 l = 0.85
-window_size = 2
+window_size = 3
 unique = True
 add_self_loop = False
-mixup = True
-if mixup:
-    lr_dc = 0.01
+mixup = False
 
 # graph_path = "./data/"+dataset+"_edges.csv"
 
@@ -32,7 +30,7 @@ if dataset == "diginetica":
     lb_smooth = 0.4
 
 elif dataset == "gowalla":
-    window_size = 4
+    # window_size = 3
     lb_smooth = 0.8
     
 elif dataset == "lastfm":
