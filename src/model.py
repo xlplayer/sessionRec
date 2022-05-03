@@ -67,38 +67,41 @@ def fix_weight_decay(model):
 
 
 class GATLayer(nn.Module):
-    def __init__(self, dim, idx):
+    def __init__(self, dim, num_heads, idx):
         super(GATLayer, self).__init__()
         self.dim = dim
+        self.num_heads = num_heads
         self.idx = idx
 
-        self.pi =  nn.Linear(self.dim, 1, bias=False)
-        self.M = nn.Linear(2*self.dim, 1, bias=False)
-        self.dropout_local = nn.Dropout(config.dropout_local)
+        self.pi =  nn.Linear(self.dim * self.num_heads, 1, bias=False)
+        self.fc = nn.Linear(self.dim, self.dim*self.num_heads)
+        self.feat_drop = nn.Dropout(config.feat_drop)
+        self.leaky_relu = nn.LeakyReLU(0.2)
 
-    def forward(self, h_v, h_d, g):
+    def forward(self, h_v, g):
         with g.local_scope():
             ###item to item
+            # h_v = self.feat_drop(h_v)
             adj = g.edge_type_subgraph(['interacts'+str(self.idx)])
-            adj.nodes['item'].data['ft'] = h_v
-            adj.edges['interacts'+str(self.idx)].data['d'] = h_d
-            adj.apply_edges(dis_u_mul_v, etype='interacts'+str(self.idx))
+            adj.nodes['item'].data['ft'] = self.fc(h_v)
+            adj.apply_edges(fn.u_mul_v('ft','ft','e'), etype='interacts'+str(self.idx))
             e = self.pi(adj.edges['interacts'+str(self.idx)].data['e'])
-            # mask = torch.sigmoid(self.M(adj.edges['interacts'+str(self.idx)].data['mask']))
-            # e = e * mask
+            e = self.leaky_relu(e)
 
-            adj.edges['interacts'+str(self.idx)].data['a'] = self.dropout_local(edge_softmax(adj['interacts'+str(self.idx)], e))
+            adj.edges['interacts'+str(self.idx)].data['a'] = edge_softmax(adj['interacts'+str(self.idx)], e)
             adj.update_all(fn.u_mul_e('ft', 'a', 'm'), fn.sum('m', 'ft'), etype='interacts'+str(self.idx))
-            return adj.nodes['item'].data['ft']
+            # return adj.nodes['item'].data['ft']
+            rst = adj.nodes['item'].data['ft']
+            return torch.max(rst.view(-1,self.num_heads,config.dim), dim=1)[0]
 
 class GAT(nn.Module):
-    def __init__(self, dim, idx=0):
+    def __init__(self, dim, num_heads=8, idx=0):
         super(GAT, self).__init__()
-        self.layer1 = GATLayer(dim, idx=idx)
+        self.layer1 = GATLayer(dim, num_heads = num_heads, idx=idx)
         # self.layer2 = GATLayer(dim)
 
-    def forward(self, h_0, h_d, g):
-        h1 = self.layer1(h_0, h_d, g)
+    def forward(self, h_0, g):
+        h1 = self.layer1(h_0, g)
         # return h1
         return h_0+h1
        
@@ -293,20 +296,19 @@ class PosAggregator(nn.Module):
 
 
 class HardSession(nn.Module):
-    def __init__(self, num_node, feat_drop=config.feat_drop, num_heads=8, order=3, pos_embedding=None, dis_embedding = None, target_embedding = None, share=True):
+    def __init__(self, num_node, feat_drop=config.feat_drop, num_heads=8, order=3, pos_embedding=None, target_embedding = None, mask=True, share=True):
         super(HardSession, self).__init__()
         self.num_node = num_node
         self.order = order
+        self.mask = mask
         print(self.num_node)
         self.embedding = nn.Embedding(self.num_node, config.dim)
 
         if share:
             self.pos_embedding = pos_embedding
-            self.dis_embedding = dis_embedding
             self.target_embedding = target_embedding
         else:
             self.pos_embedding = nn.Embedding(200, config.dim)
-            self.dis_embedding = nn.Embedding(50, config.dim)
             self.target_embedding = nn.Embedding(10, config.dim)
         self.feat_drop = nn.Dropout(feat_drop)
         
@@ -347,10 +349,6 @@ class HardSession(nn.Module):
         h_v = self.embedding(g.nodes['item'].data['iid'])
         h_v = self.feat_drop(h_v)
         h_v = F.normalize(h_v, dim=-1)
-        
-        h_d = []
-        for i in range(config.window_size):
-            h_d.append(self.dis_embedding(g.edges['interacts'+str(i)].data['dis']))
 
         h_p = self.pos_embedding(g.edges['agg'].data['pid'])
         h_r = self.target_embedding(g.nodes['target'].data['tid'])
@@ -377,27 +375,34 @@ class HardSession(nn.Module):
         b = F.normalize(b, dim=-1)
 
         logits = sr @ b.t()
-        phi = self.sc_sr(sr).unsqueeze(-1)
-        mask = torch.zeros(phi.size(0), config.num_node).cuda()
-        iids = torch.split(g.nodes['item'].data['iid'], g.batch_num_nodes('item').tolist())
-        for i in range(len(mask)):
-            mask[i, iids[i]] = 1
 
-        logits_in = logits.masked_fill(~mask.bool().unsqueeze(1), float('-inf'))
-        logits_ex = logits.masked_fill(mask.bool().unsqueeze(1), float('-inf'))
-        score     = torch.softmax(12 * logits_in.squeeze(), dim=-1)
-        score_ex  = torch.softmax(12 * logits_ex.squeeze(), dim=-1)
-        if self.order == 1:
-            phi = phi.squeeze(1)
-            score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
+        if self.mask:
+            phi = self.sc_sr(sr).unsqueeze(-1)
+            mask = torch.zeros(phi.size(0), config.num_node).cuda()
+            iids = torch.split(g.nodes['item'].data['iid'], g.batch_num_nodes('item').tolist())
+            for i in range(len(mask)):
+                mask[i, iids[i]] = 1
+
+            logits_in = logits.masked_fill(~mask.bool().unsqueeze(1), float('-inf'))
+            logits_ex = logits.masked_fill(mask.bool().unsqueeze(1), float('-inf'))
+            score     = torch.softmax(12 * logits_in.squeeze(), dim=-1)
+            score_ex  = torch.softmax(12 * logits_ex.squeeze(), dim=-1)
+            if self.order == 1:
+                phi = phi.squeeze(1)
+                score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
+            else:
+                score = (torch.cat((score.unsqueeze(2), score_ex.unsqueeze(2)), dim=2) * phi).sum(2)
+
         else:
-            score = (torch.cat((score.unsqueeze(2), score_ex.unsqueeze(2)), dim=2) * phi).sum(2)
+            score = torch.softmax(12 * logits.squeeze(), dim=-1)
+
 
         if self.order>1:
             alpha = torch.softmax(self.alpha.unsqueeze(0), dim=-1).view(1, self.alpha.size(0), 1)
             score = (score * alpha.repeat(score.size(0), 1, 1)).sum(1)
         else:
             score = score.squeeze(1)
+
         score = torch.log(score)
 
         if not training:
@@ -407,30 +412,30 @@ class HardSession(nn.Module):
         return loss
         
 class EasySession(nn.Module):
-    def __init__(self, num_node, order=3, pos_embedding=None, dis_embedding = None, target_embedding = None, share=True):
+    def __init__(self, num_node, feat_drop=config.feat_drop, num_heads=8, order=3, pos_embedding=None, target_embedding = None, mask=False, share=True):
         super(EasySession, self).__init__()
         self.num_node = num_node
         self.order = order
+        self.mask = mask
         print(self.num_node)
         self.register_buffer('alpha', torch.Tensor(self.order))
         self.embedding = nn.Embedding(self.num_node, config.dim)
 
         if share:
             self.pos_embedding = pos_embedding
-            self.dis_embedding = dis_embedding
             self.target_embedding = target_embedding
         else:
             self.pos_embedding = nn.Embedding(200, config.dim)
-            self.dis_embedding = nn.Embedding(50, config.dim)
             self.target_embedding = nn.Embedding(10, config.dim)
-        self.feat_drop = nn.Dropout(config.feat_drop)
+        self.feat_drop = nn.Dropout(feat_drop)
         self.gat1   = nn.ModuleList()
         self.gat2 = nn.ModuleList()
         self.agg = nn.ModuleList()
         self.fc_sr = nn.ModuleList()
+        self.sc_sr = nn.Sequential(nn.Linear(config.dim, config.dim, bias=True),  nn.ReLU(), nn.Linear(config.dim, 2, bias=False), nn.Softmax(dim=-1))
         for i in range(self.order):
-            self.gat1.append(GAT(config.dim, idx=i))
-            self.gat2.append(GAT(config.dim, idx=i))
+            self.gat1.append(GAT(config.dim, num_heads=num_heads, idx=i))
+            self.gat2.append(GAT(config.dim, num_heads=num_heads, idx=i))
             self.agg.append(PosAggregator(config.dim))
             self.fc_sr.append(nn.Linear(2*config.dim, config.dim, bias=False))
 
@@ -457,17 +462,13 @@ class EasySession(nn.Module):
         h_v = self.feat_drop(h_v)
         h_v = F.normalize(h_v, dim=-1)
         
-        h_d = []
-        for i in range(config.window_size):
-            h_d.append(self.dis_embedding(g.edges['interacts'+str(i)].data['dis']))
-
         h_p = self.pos_embedding(g.edges['agg'].data['pid'])
         h_r = self.target_embedding(g.nodes['target'].data['tid'])
 
         feat, last_feat = [],[]
         for i in range(self.order):
-            h1 =self.gat1[i](h_v, h_d[i], g)
-            h2 = self.gat2[i](h_v, h_d[i], g.reverse(copy_edata=True).edge_type_subgraph(['interacts'+str(i)]))
+            h1 =self.gat1[i](h_v, g)
+            h2 = self.gat2[i](h_v, g.reverse(copy_edata=True).edge_type_subgraph(['interacts'+str(i)]))
             h = h1+h2
             h = F.normalize(h, dim=-1)
 
@@ -486,13 +487,34 @@ class EasySession(nn.Module):
         b = F.normalize(b, dim=-1)
 
         logits = sr @ b.t()
-        score = torch.softmax(12 * logits.squeeze(), dim=-1)
-        
+
+        if self.mask:
+            phi = self.sc_sr(sr).unsqueeze(-1)
+            mask = torch.zeros(phi.size(0), config.num_node).cuda()
+            iids = torch.split(g.nodes['item'].data['iid'], g.batch_num_nodes('item').tolist())
+            for i in range(len(mask)):
+                mask[i, iids[i]] = 1
+
+            logits_in = logits.masked_fill(~mask.bool().unsqueeze(1), float('-inf'))
+            logits_ex = logits.masked_fill(mask.bool().unsqueeze(1), float('-inf'))
+            score     = torch.softmax(12 * logits_in.squeeze(), dim=-1)
+            score_ex  = torch.softmax(12 * logits_ex.squeeze(), dim=-1)
+            if self.order == 1:
+                phi = phi.squeeze(1)
+                score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
+            else:
+                score = (torch.cat((score.unsqueeze(2), score_ex.unsqueeze(2)), dim=2) * phi).sum(2)
+
+        else:
+            score = torch.softmax(12 * logits.squeeze(), dim=-1)
+            
+
         if self.order>1:
             alpha = torch.softmax(self.alpha.unsqueeze(0), dim=-1).view(1, self.alpha.size(0), 1)
             score = (score * alpha.repeat(score.size(0), 1, 1)).sum(1)
         else:
             score = score.squeeze(1)
+
         score = torch.log(score)
 
         if not training:
@@ -509,12 +531,11 @@ class Ensamble(nn.Module):
         self.order = order
 
         self.pos_embedding = nn.Embedding(200, config.dim)
-        self.dis_embedding = nn.Embedding(200, config.dim)
         self.target_embedding = nn.Embedding(10, config.dim)
         
 
-        self.esay = EasySession(num_node=num_node, order = order, pos_embedding=self.pos_embedding, dis_embedding = self.dis_embedding, target_embedding = self.target_embedding, share=True)
-        self.hard = HardSession(num_node=num_node, feat_drop=feat_drop, num_heads=num_heads, order=order, pos_embedding=self.pos_embedding, dis_embedding = self.dis_embedding, target_embedding = self.target_embedding, share=True)
+        self.esay = EasySession(num_node=num_node, feat_drop=feat_drop, num_heads=num_heads, order=order, pos_embedding=self.pos_embedding, target_embedding = self.target_embedding, mask=False, share=True)
+        self.hard = HardSession(num_node=num_node, feat_drop=feat_drop, num_heads=num_heads, order=order, pos_embedding=self.pos_embedding, target_embedding = self.target_embedding, mask=True, share=True)
         
         self.loss_function = LabelSmoothSoftmaxCEV1(lb_smooth=config.lb_smooth, reduction='mean')
         print('weight_decay:', config.weight_decay)

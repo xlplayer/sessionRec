@@ -59,7 +59,7 @@ class Data(Dataset):
 
         for i in range(config.window_size):
             src, dst = [], []
-            for j in range(i+1, i+2):
+            for j in range(1, i+2):
                 src = src + seq_nid[:-j]
                 dst = dst + seq_nid[j:]
             if self.unique:
