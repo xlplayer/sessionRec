@@ -355,6 +355,9 @@ class HardSession(nn.Module):
 
         feat, last_feat = [],[]
         for i in range(self.order):
+            ##0nd
+            q,p = self.agg[i](h_v, h_p, h_r, g)
+            ##
             h1 = self.gat1[i](g.edge_type_subgraph(['interacts'+str(i)]), {'item':h_v})
             h1 = torch.max(h1['item'], dim=1)[0]
             h2 = self.gat2[i](g.reverse(copy_edata=True).edge_type_subgraph(['interacts'+str(i)]), {'item':h_v})
@@ -362,6 +365,20 @@ class HardSession(nn.Module):
             h = h1+h2
             h = F.normalize(h, dim=-1)
             x, y = self.agg[i](h, h_p, h_r, g)
+
+            ##2nd
+            h1 = self.gat1[i](g.edge_type_subgraph(['interacts'+str(i)]), {'item':h})
+            h1 = torch.max(h1['item'], dim=1)[0]
+            h2 = self.gat2[i](g.reverse(copy_edata=True).edge_type_subgraph(['interacts'+str(i)]), {'item':h})
+            h2 = torch.max(h2['item'], dim=1)[0]
+            h = h1+h2
+            h = F.normalize(h, dim=-1)
+
+            z, w = self.agg[i](h, h_p, h_r, g)
+            ##
+            x = q+x+z
+            y = p+y+w
+
             feat.append(x.unsqueeze(1))
             last_feat.append(y.unsqueeze(1))
         
@@ -385,29 +402,19 @@ class HardSession(nn.Module):
 
             logits_in = logits.masked_fill(~mask.bool().unsqueeze(1), float('-inf'))
             logits_ex = logits.masked_fill(mask.bool().unsqueeze(1), float('-inf'))
-            score     = torch.softmax(12 * logits_in.squeeze(), dim=-1)
-            score_ex  = torch.softmax(12 * logits_ex.squeeze(), dim=-1)
-            if self.order == 1:
-                phi = phi.squeeze(1)
-                score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
-            else:
-                score = (torch.cat((score.unsqueeze(2), score_ex.unsqueeze(2)), dim=2) * phi).sum(2)
+            score     = torch.softmax(12 * logits_in, dim=-1)
+            score_ex  = torch.softmax(12 * logits_ex, dim=-1)
+            score = (torch.cat((score.unsqueeze(2), score_ex.unsqueeze(2)), dim=2) * phi).sum(2)
 
         else:
-            score = torch.softmax(12 * logits.squeeze(), dim=-1)
+            score = torch.softmax(12 * logits, dim=-1)
 
-
-        if self.order>1:
-            alpha = torch.softmax(self.alpha.unsqueeze(0), dim=-1).view(1, self.alpha.size(0), 1)
-            score = (score * alpha.repeat(score.size(0), 1, 1)).sum(1)
-        else:
-            score = score.squeeze(1)
-
-        score = torch.log(score)
+        score = score.sum(1)
 
         if not training:
-            return score
+            return score,sr
 
+        score = torch.log(score)
         loss = self.loss_function(score, targets)
         return loss
         
@@ -467,12 +474,28 @@ class EasySession(nn.Module):
 
         feat, last_feat = [],[]
         for i in range(self.order):
+            ##0nd
+            q,p = self.agg[i](h_v, h_p, h_r, g)
+            ##
             h1 =self.gat1[i](h_v, g)
             h2 = self.gat2[i](h_v, g.reverse(copy_edata=True).edge_type_subgraph(['interacts'+str(i)]))
             h = h1+h2
             h = F.normalize(h, dim=-1)
 
             x, y = self.agg[i](h, h_p, h_r, g)
+
+
+            ##2nd
+            h1 =self.gat1[i](h, g)
+            h2 = self.gat2[i](h, g.reverse(copy_edata=True).edge_type_subgraph(['interacts'+str(i)]))
+            h = h1+h2
+            h = F.normalize(h, dim=-1)
+
+            z, w = self.agg[i](h, h_p, h_r, g)
+            ##
+            x = q+x+z
+            y = p+y+w
+
             feat.append(x.unsqueeze(1))
             last_feat.append(y.unsqueeze(1))
 
@@ -499,27 +522,17 @@ class EasySession(nn.Module):
             logits_ex = logits.masked_fill(mask.bool().unsqueeze(1), float('-inf'))
             score     = torch.softmax(12 * logits_in.squeeze(), dim=-1)
             score_ex  = torch.softmax(12 * logits_ex.squeeze(), dim=-1)
-            if self.order == 1:
-                phi = phi.squeeze(1)
-                score = (torch.cat((score.unsqueeze(1), score_ex.unsqueeze(1)), dim=1) * phi).sum(1)
-            else:
-                score = (torch.cat((score.unsqueeze(2), score_ex.unsqueeze(2)), dim=2) * phi).sum(2)
+            score = (torch.cat((score.unsqueeze(2), score_ex.unsqueeze(2)), dim=2) * phi).sum(2)
 
         else:
-            score = torch.softmax(12 * logits.squeeze(), dim=-1)
+            score = torch.softmax(12 * logits, dim=-1)
             
-
-        if self.order>1:
-            alpha = torch.softmax(self.alpha.unsqueeze(0), dim=-1).view(1, self.alpha.size(0), 1)
-            score = (score * alpha.repeat(score.size(0), 1, 1)).sum(1)
-        else:
-            score = score.squeeze(1)
+        score = score.sum(1)
+        
+        if not training:
+            return score,sr
 
         score = torch.log(score)
-
-        if not training:
-            return score
-
         loss = self.loss_function(score, targets)
         return loss
 
@@ -531,8 +544,8 @@ class Ensamble(nn.Module):
         self.order = order
 
         self.pos_embedding = nn.Embedding(200, config.dim)
-        self.target_embedding = nn.Embedding(10, config.dim)
-        
+        self.target_embedding = nn.Embedding(10, config.dim)        
+        self.alpha = nn.Parameter(torch.Tensor(self.order))
 
         self.esay = EasySession(num_node=num_node, feat_drop=feat_drop, num_heads=num_heads, order=order, pos_embedding=self.pos_embedding, target_embedding = self.target_embedding, mask=False, share=True)
         self.hard = HardSession(num_node=num_node, feat_drop=feat_drop, num_heads=num_heads, order=order, pos_embedding=self.pos_embedding, target_embedding = self.target_embedding, mask=True, share=True)
@@ -545,7 +558,7 @@ class Ensamble(nn.Module):
             params = self.parameters()
         self.optimizer = torch.optim.Adam(params, lr=config.lr, weight_decay=config.weight_decay)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=config.lr_dc_step, gamma=config.lr_dc)
-
+        
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -555,12 +568,14 @@ class Ensamble(nn.Module):
         
     
     def forward(self, g, targets, epoch=None, training=False):
-        score1 = self.esay(g, targets, training=False)
-        score2 = self.hard(g, targets, training=False)
-        score = score1+score2
+        score1,sr1 = self.esay(g, targets, training=False)
+        score2,sr2 = self.hard(g, targets, training=False)
+        score = score1*score2
 
         if not training:
             return score
 
+        score = torch.log(score)
         loss = self.loss_function(score, targets)
         return loss
+    

@@ -51,7 +51,6 @@ def collate_fn(samples):
     g = dgl.batch(g)
     return g, torch.tensor(target)
 
-
 def train_test(model, train_data, test_data, epoch, train_sessions):
     print('start training: ', datetime.datetime.now())
     model.train()

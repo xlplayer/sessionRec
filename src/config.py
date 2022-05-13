@@ -1,4 +1,4 @@
-dataset = 'diginetica'
+dataset = 'lastfm'
 num_node = 43098
 dim =256
 epoch = 10
@@ -50,3 +50,4 @@ elif dataset == "yoochoose1_4":
 elif dataset == "yoochoose1_64":
     num_node = 37484
     lb_smooth = 0.6
+
